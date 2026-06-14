@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 from ._ffi import ffi, _require_lib
+from ._schema import (
+    PipelineSchema, _register_schema, _unregister_schema,
+    load_pipeline_schema,
+)
 from .errors import ProvisionError, _capture_errno
 
 
@@ -13,9 +17,10 @@ class PipelineConfig:
     Keep alive for the duration of CRUD operations.
     """
 
-    def __init__(self, ptr, name: str) -> None:
+    def __init__(self, ptr, name: str, schema=None) -> None:
         self._ptr = ptr
         self.name = name
+        self.schema = schema
 
     @property
     def is_valid(self) -> bool:
@@ -27,6 +32,7 @@ class PipelineConfig:
             lib = _require_lib()
             lib.p4tc_pipe_config_destroy(self._ptr)
             self._ptr = None
+            _unregister_schema(self.name)
 
     def __enter__(self):
         return self
@@ -64,4 +70,9 @@ def provision(pipeline_name: str, template_path: str | None = None):
             errno=_capture_errno() or None,
         )
 
-    return PipelineConfig(ptr, pipeline_name)
+    # load JSON schema if available (non-fatal)
+    schema = load_pipeline_schema(pipeline_name, template_path)
+    if schema is not None:
+        _register_schema(schema)
+
+    return PipelineConfig(ptr, pipeline_name, schema=schema)

@@ -4,6 +4,7 @@ from __future__ import annotations
 from typing import Any
 
 from ._ffi import ffi, _require_lib
+from ._schema import _get_schema
 from .errors import (
     ContextError, CRUDError, EntryError, KeyError_, ObjectError,
     _capture_errno,
@@ -53,6 +54,8 @@ class Context:
                         flags=0, priority=0, entity=Entity.TC):
         """Build obj + key + action, then call the CRUD function."""
         lib = self._lib
+        schema = _get_schema(pipeline)
+        table_schema = schema.get_table(table) if schema else None
 
         obj = lib.p4tc_obj_create(pipeline.encode(), int(ObjType.TABLE))
         if obj == ffi.NULL:
@@ -66,8 +69,12 @@ class Context:
                 lib.p4tc_obj_filter_set(obj, filter_str.encode())
 
             if key is not None:
+                # dict keys validated against schema for correct ordering
                 if isinstance(key, dict):
-                    key_values = list(key.values())
+                    if table_schema is not None:
+                        key_values = table_schema.validate_key(key)
+                    else:
+                        key_values = list(key.values())
                 else:
                     key_values = list(key)
 
@@ -90,7 +97,7 @@ class Context:
                 ffi.release(tbl_key)
 
                 if action is not None:
-                    self._attach_action(lib, entry, action)
+                    self._attach_action(lib, entry, action, table_schema)
 
             elif action is not None:
                 entry = lib.p4tc_alloc_tbl_entry(obj, ffi.NULL,
@@ -98,7 +105,7 @@ class Context:
                 if entry == ffi.NULL:
                     raise EntryError(f"alloc_tbl_entry failed for '{table}'",
                                      errno=_capture_errno())
-                self._attach_action(lib, entry, action)
+                self._attach_action(lib, entry, action, table_schema)
 
             ret = crud_fn(self._ctx, obj, flags, ffi.NULL, ffi.NULL)
             if ret != 0:
@@ -109,11 +116,18 @@ class Context:
             lib.p4tc_obj_destroy(obj)
 
     @staticmethod
-    def _attach_action(lib, entry, action):
+    def _attach_action(lib, entry, action, table_schema=None):
         """Attach an action to a table entry."""
         act_path, act_params = action
         if isinstance(act_params, dict):
-            param_values = list(act_params.values())
+            if table_schema:
+                act_schema = table_schema.get_action(act_path)
+                if act_schema:
+                    param_values = act_schema.validate_params(act_params)
+                else:
+                    param_values = list(act_params.values())
+            else:
+                param_values = list(act_params.values())
         else:
             param_values = list(act_params)
 

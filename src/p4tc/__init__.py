@@ -18,6 +18,7 @@ Quick start::
 
 __version__ = "0.1.0"
 
+from ._schema import PipelineSchema
 from .context import Context
 from .errors import (
     CRUDError, ContextError, EntryError, KeyError_,
@@ -27,7 +28,7 @@ from .provision import PipelineConfig, provision
 from .types import Entity, MsgFlags, ObjType, Phase, Policy, Transport
 
 __all__ = [
-    "provision", "Context", "PipelineConfig",
+    "provision", "Context", "PipelineConfig", "PipelineSchema",
     "Transport", "ObjType", "Entity", "Phase", "MsgFlags", "Policy",
     "P4TCError", "ProvisionError", "ContextError",
     "ObjectError", "KeyError_", "EntryError", "CRUDError",
