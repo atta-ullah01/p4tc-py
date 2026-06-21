@@ -7,6 +7,7 @@ from p4tc.context import Context
 from p4tc.types import MsgFlags, Phase
 
 
+
 class TestCallbackSetup:
     """Context.__init__ should wire up a default cffi callback."""
 
@@ -82,6 +83,7 @@ class TestUserCallback:
         ctx.destroy()
 
 
+
 class TestResponseHandling:
     """Verify that CRUD methods call p4tc_resp_handle when appropriate."""
 
@@ -98,4 +100,79 @@ class TestResponseHandling:
         ctx.insert("pipe", "ingress/t",
                    key={"k": "v"}, action=("act", {"p": "v"}))
         mock_lib.p4tc_resp_handle.assert_not_called()
+        ctx.destroy()
+
+
+
+class TestEntryAttributes:
+    """Optional kwargs on insert/update should call the right C setters."""
+
+    def test_no_attrs_by_default(self, mock_lib):
+        ctx = Context(_lib=mock_lib)
+        ctx.insert("p", "t", key={"k": "v"}, action=("a", {"p": "v"}))
+
+        mock_lib.p4tc_runt_tbl_attrs_aging_set.assert_not_called()
+        mock_lib.p4tc_runt_tbl_attrs_profile_id_set.assert_not_called()
+        mock_lib.p4tc_runt_tbl_attrs_perms_set.assert_not_called()
+        mock_lib.p4tc_runt_tbl_attrs_dyn_set.assert_not_called()
+        ctx.destroy()
+
+    def test_aging_ms(self, mock_lib):
+        ctx = Context(_lib=mock_lib)
+        ctx.insert("p", "t", key={"k": "v"}, action=("a", {"p": "v"}),
+                   aging_ms=5000)
+        mock_lib.p4tc_runt_tbl_attrs_aging_set.assert_called_once_with(
+            ffi.cast("void *", 30), 5000)
+        ctx.destroy()
+
+    def test_profile_id(self, mock_lib):
+        ctx = Context(_lib=mock_lib)
+        ctx.insert("p", "t", key={"k": "v"}, action=("a", {"p": "v"}),
+                   profile_id=7)
+        mock_lib.p4tc_runt_tbl_attrs_profile_id_set.assert_called_once_with(
+            ffi.cast("void *", 30), 7)
+        ctx.destroy()
+
+    def test_permissions(self, mock_lib):
+        ctx = Context(_lib=mock_lib)
+        ctx.insert("p", "t", key={"k": "v"}, action=("a", {"p": "v"}),
+                   permissions=0x3CA6)
+        mock_lib.p4tc_runt_tbl_attrs_perms_set.assert_called_once_with(
+            ffi.cast("void *", 30), 0x3CA6)
+        ctx.destroy()
+
+    def test_dynamic_true_sends_1(self, mock_lib):
+        ctx = Context(_lib=mock_lib)
+        ctx.insert("p", "t", key={"k": "v"}, action=("a", {"p": "v"}),
+                   dynamic=True)
+        mock_lib.p4tc_runt_tbl_attrs_dyn_set.assert_called_once_with(
+            ffi.cast("void *", 30), 1)
+        ctx.destroy()
+
+    def test_dynamic_false_sends_0(self, mock_lib):
+        ctx = Context(_lib=mock_lib)
+        ctx.insert("p", "t", key={"k": "v"}, action=("a", {"p": "v"}),
+                   dynamic=False)
+        mock_lib.p4tc_runt_tbl_attrs_dyn_set.assert_called_once_with(
+            ffi.cast("void *", 30), 0)
+        ctx.destroy()
+
+    def test_all_attrs_at_once(self, mock_lib):
+        ctx = Context(_lib=mock_lib)
+        ctx.insert("p", "t", key={"k": "v"}, action=("a", {"p": "v"}),
+                   priority=10, aging_ms=3000, permissions=0xFF,
+                   dynamic=True, profile_id=2)
+
+        mock_lib.p4tc_runt_tbl_attrs_prio_set.assert_called_once()
+        mock_lib.p4tc_runt_tbl_attrs_aging_set.assert_called_once()
+        mock_lib.p4tc_runt_tbl_attrs_perms_set.assert_called_once()
+        mock_lib.p4tc_runt_tbl_attrs_dyn_set.assert_called_once()
+        mock_lib.p4tc_runt_tbl_attrs_profile_id_set.assert_called_once()
+        ctx.destroy()
+
+    def test_update_also_passes_attrs(self, mock_lib):
+        ctx = Context(_lib=mock_lib)
+        ctx.update("p", "t", key={"k": "v"}, action=("a", {"p": "v"}),
+                   aging_ms=1000)
+        mock_lib.p4tc_runt_tbl_attrs_aging_set.assert_called_once()
         ctx.destroy()

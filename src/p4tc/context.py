@@ -42,6 +42,8 @@ class Context:
         )
         self._lib.p4tc_runt_ctx_dflt_cb_set(self._ctx, self._c_callback)
 
+
+
     def _on_response(self, obj_ptr, ctx_ptr, cookie_ptr, phase_val):
         """Invoked by the C library for every response message.
 
@@ -90,6 +92,8 @@ class Context:
                     errno=_capture_errno(),
                 )
 
+
+
     @property
     def is_valid(self):
         return self._ctx is not None and self._ctx != ffi.NULL
@@ -112,9 +116,13 @@ class Context:
         state = "valid" if self.is_valid else "destroyed"
         return f"Context({state})"
 
+
+
     def _build_and_send(self, crud_fn, pipeline, table, *,
                         key=None, action=None, filter_str=None,
-                        flags=0, priority=0, entity=Entity.TC):
+                        flags=0, priority=0, entity=Entity.TC,
+                        aging_ms=None, profile_id=None,
+                        permissions=None, dynamic=None):
         """Build a ``p4tc_obj``, attach key/action, and fire the CRUD call."""
         lib = self._lib
         schema = _get_schema(pipeline)
@@ -154,8 +162,11 @@ class Context:
                 if entry == ffi.NULL:
                     raise EntryError(f"alloc_tbl_entry failed for '{table}'",
                                      errno=_capture_errno())
-                if priority > 0:
-                    lib.p4tc_runt_tbl_attrs_prio_set(entry, priority)
+                self._apply_entry_attrs(lib, entry, priority=priority,
+                                        aging_ms=aging_ms,
+                                        profile_id=profile_id,
+                                        permissions=permissions,
+                                        dynamic=dynamic)
                 # key ownership transferred to obj
                 ffi.release(tbl_key)
 
@@ -168,8 +179,11 @@ class Context:
                 if entry == ffi.NULL:
                     raise EntryError(f"alloc_tbl_entry failed for '{table}'",
                                      errno=_capture_errno())
-                if priority > 0:
-                    lib.p4tc_runt_tbl_attrs_prio_set(entry, priority)
+                self._apply_entry_attrs(lib, entry, priority=priority,
+                                        aging_ms=aging_ms,
+                                        profile_id=profile_id,
+                                        permissions=permissions,
+                                        dynamic=dynamic)
                 self._attach_action(lib, entry, action, table_schema)
 
             ret = crud_fn(self._ctx, obj, int(flags), ffi.NULL, ffi.NULL)
@@ -179,6 +193,26 @@ class Context:
             return ret
         finally:
             lib.p4tc_obj_destroy(obj)
+
+    @staticmethod
+    def _apply_entry_attrs(lib, entry, *, priority=0, aging_ms=None,
+                           profile_id=None, permissions=None,
+                           dynamic=None):
+        """Call C setter functions for optional table entry attributes.
+
+        Only calls setters for values that were explicitly provided
+        (i.e. not None / not zero for priority).
+        """
+        if priority > 0:
+            lib.p4tc_runt_tbl_attrs_prio_set(entry, priority)
+        if aging_ms is not None:
+            lib.p4tc_runt_tbl_attrs_aging_set(entry, aging_ms)
+        if profile_id is not None:
+            lib.p4tc_runt_tbl_attrs_profile_id_set(entry, profile_id)
+        if permissions is not None:
+            lib.p4tc_runt_tbl_attrs_perms_set(entry, permissions)
+        if dynamic is not None:
+            lib.p4tc_runt_tbl_attrs_dyn_set(entry, 1 if dynamic else 0)
 
     @staticmethod
     def _attach_action(lib, entry, action, table_schema=None):
@@ -204,22 +238,46 @@ class Context:
             raise EntryError(f"create_runt_act failed for '{act_path}'",
                              errno=_capture_errno())
 
+
+
     def insert(self, pipeline, table, *, key, action,
-               priority=0, entity=Entity.TC, flags=0):
-        """Create a new table entry."""
+               priority=0, entity=Entity.TC, flags=0,
+               aging_ms=None, profile_id=None,
+               permissions=None, dynamic=None):
+        """Create a new table entry.
+
+        Optional entry attributes:
+            aging_ms:    entry aging timeout in milliseconds
+            profile_id:  profile identifier
+            permissions: permission bits (CRUDS+XP)
+            dynamic:     mark entry as dynamic (bool)
+        """
         self._reset_response_state()
         self._build_and_send(self._lib.p4tc_create, pipeline, table,
                              key=key, action=action, priority=priority,
-                             entity=entity, flags=int(flags))
+                             entity=entity, flags=int(flags),
+                             aging_ms=aging_ms, profile_id=profile_id,
+                             permissions=permissions, dynamic=dynamic)
         self._recv_response(flags, pipeline, table, "insert")
 
     def update(self, pipeline, table, *, key=None, action=None,
-               filter_str=None, priority=0, entity=Entity.TC, flags=0):
-        """Update an existing table entry."""
+               filter_str=None, priority=0, entity=Entity.TC, flags=0,
+               aging_ms=None, profile_id=None,
+               permissions=None, dynamic=None):
+        """Update an existing table entry.
+
+        Optional entry attributes:
+            aging_ms:    entry aging timeout in milliseconds
+            profile_id:  profile identifier
+            permissions: permission bits (CRUDS+XP)
+            dynamic:     mark entry as dynamic (bool)
+        """
         self._reset_response_state()
         self._build_and_send(self._lib.p4tc_update, pipeline, table,
                              key=key, action=action, filter_str=filter_str,
-                             priority=priority, entity=entity, flags=int(flags))
+                             priority=priority, entity=entity, flags=int(flags),
+                             aging_ms=aging_ms, profile_id=profile_id,
+                             permissions=permissions, dynamic=dynamic)
         self._recv_response(flags, pipeline, table, "update")
 
     def get(self, pipeline, table, *, key=None,
