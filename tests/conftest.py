@@ -51,6 +51,7 @@ def _make_mock_lib(**overrides):
         "p4tc_alloc_tbl_entry": ffi.cast("void *", 30),
         "p4tc_runt_tbl_attrs_prio_set": None,
         "p4tc_create_runt_act": ffi.cast("void *", 40),
+        "p4tc_create_runt_ext": ffi.cast("void *", 50),
         "p4tc_create": 0,
         "p4tc_update": 0,
         "p4tc_get": 0,

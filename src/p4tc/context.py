@@ -349,3 +349,110 @@ class Context:
     def flush(self, pipeline, table, *, flags=0):
         """Delete all entries from a table."""
         self.delete(pipeline, table, flags=flags)
+
+
+    def _build_extern_obj(self, pipeline, kind, instance, key,
+                          params=None):
+        """Build a p4tc_obj for an extern operation.
+
+        Returns (obj, ext_attrs) — caller must destroy obj when done.
+        """
+        lib = self._lib
+        obj = lib.p4tc_obj_create(pipeline.encode(), int(ObjType.EXTERN))
+        if obj == ffi.NULL:
+            raise ObjectError(f"obj_create failed for '{pipeline}'",
+                              errno=_capture_errno())
+
+        param_values = list(params.values()) if isinstance(params, dict) \
+            else list(params or [])
+
+        param_ptrs = [ffi.new("char[]", p.encode()) for p in param_values]
+        param_arr = ffi.new("const char *[]", param_ptrs) \
+            if param_ptrs else ffi.NULL
+
+        ext = lib.p4tc_create_runt_ext(
+            obj, kind.encode(), instance.encode(),
+            key, len(param_values), param_arr,
+        )
+        if ext == ffi.NULL:
+            lib.p4tc_obj_destroy(obj)
+            raise EntryError(
+                f"create_runt_ext failed for '{kind}/{instance}'",
+                errno=_capture_errno())
+
+        return obj
+
+    def extern_insert(self, pipeline, kind, instance, *, key,
+                      params=None, flags=0):
+        """Create an extern instance entry."""
+        self._reset_response_state()
+        obj = self._build_extern_obj(pipeline, kind, instance, key, params)
+        try:
+            ret = self._lib.p4tc_create(self._ctx, obj, int(flags),
+                                        ffi.NULL, ffi.NULL)
+            if ret != 0:
+                raise CRUDError(
+                    f"extern create failed for '{kind}/{instance}'",
+                    errno=_capture_errno())
+        finally:
+            self._lib.p4tc_obj_destroy(obj)
+        self._recv_response(flags, pipeline, f"{kind}/{instance}",
+                            "extern_insert")
+
+    def extern_update(self, pipeline, kind, instance, *, key,
+                      params=None, flags=0):
+        """Update an extern instance entry."""
+        self._reset_response_state()
+        obj = self._build_extern_obj(pipeline, kind, instance, key, params)
+        try:
+            ret = self._lib.p4tc_update(self._ctx, obj, int(flags),
+                                        ffi.NULL, ffi.NULL)
+            if ret != 0:
+                raise CRUDError(
+                    f"extern update failed for '{kind}/{instance}'",
+                    errno=_capture_errno())
+        finally:
+            self._lib.p4tc_obj_destroy(obj)
+        self._recv_response(flags, pipeline, f"{kind}/{instance}",
+                            "extern_update")
+
+    def extern_get(self, pipeline, kind, instance, *, key,
+                   flags=MsgFlags.ECHO, callback=None):
+        """Read an extern instance entry.
+
+        Returns None until C getter functions are available upstream.
+        """
+        self._reset_response_state()
+        self._user_cb = callback
+        try:
+            obj = self._build_extern_obj(pipeline, kind, instance, key)
+            try:
+                ret = self._lib.p4tc_get(self._ctx, obj, int(flags),
+                                         ffi.NULL, ffi.NULL)
+                if ret != 0:
+                    raise CRUDError(
+                        f"extern get failed for '{kind}/{instance}'",
+                        errno=_capture_errno())
+            finally:
+                self._lib.p4tc_obj_destroy(obj)
+            self._recv_response(flags, pipeline, f"{kind}/{instance}",
+                                "extern_get")
+        finally:
+            self._user_cb = None
+        return None
+
+    def extern_delete(self, pipeline, kind, instance, *, key, flags=0):
+        """Delete an extern instance entry."""
+        self._reset_response_state()
+        obj = self._build_extern_obj(pipeline, kind, instance, key)
+        try:
+            ret = self._lib.p4tc_del(self._ctx, obj, int(flags),
+                                     ffi.NULL, ffi.NULL)
+            if ret != 0:
+                raise CRUDError(
+                    f"extern delete failed for '{kind}/{instance}'",
+                    errno=_capture_errno())
+        finally:
+            self._lib.p4tc_obj_destroy(obj)
+        self._recv_response(flags, pipeline, f"{kind}/{instance}",
+                            "extern_delete")

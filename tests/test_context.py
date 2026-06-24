@@ -4,6 +4,7 @@ import pytest
 
 from p4tc._ffi import ffi
 from p4tc.context import Context
+from p4tc.errors import EntryError
 from p4tc.types import MsgFlags, Phase
 
 
@@ -175,4 +176,62 @@ class TestEntryAttributes:
         ctx.update("p", "t", key={"k": "v"}, action=("a", {"p": "v"}),
                    aging_ms=1000)
         mock_lib.p4tc_runt_tbl_attrs_aging_set.assert_called_once()
+        ctx.destroy()
+
+
+class TestExternCRUD:
+    """extern_insert/update/get/delete should call the right C functions."""
+
+    def test_extern_insert_calls_create(self, mock_lib):
+        ctx = Context(_lib=mock_lib)
+        ctx.extern_insert("pipe", "Counter", "ingress/bytes", key=1,
+                          params={"packets": "0", "bytes": "0"})
+        mock_lib.p4tc_create_runt_ext.assert_called_once()
+        mock_lib.p4tc_create.assert_called_once()
+        ctx.destroy()
+
+    def test_extern_insert_uses_extern_obj_type(self, mock_lib):
+        ctx = Context(_lib=mock_lib)
+        ctx.extern_insert("pipe", "Counter", "ingress/bytes", key=1)
+        # ObjType.EXTERN == 2
+        mock_lib.p4tc_obj_create.assert_called_with(b"pipe", 2)
+        ctx.destroy()
+
+    def test_extern_update_calls_update(self, mock_lib):
+        ctx = Context(_lib=mock_lib)
+        ctx.extern_update("pipe", "Counter", "ingress/bytes", key=1,
+                          params={"packets": "100"})
+        mock_lib.p4tc_update.assert_called_once()
+        ctx.destroy()
+
+    def test_extern_get_calls_resp_handle(self, mock_lib):
+        ctx = Context(_lib=mock_lib)
+        ctx.extern_get("pipe", "Counter", "ingress/bytes", key=1)
+        mock_lib.p4tc_get.assert_called_once()
+        mock_lib.p4tc_resp_handle.assert_called_once()
+        ctx.destroy()
+
+    def test_extern_get_returns_none(self, mock_lib):
+        ctx = Context(_lib=mock_lib)
+        result = ctx.extern_get("pipe", "Counter", "ingress/bytes", key=1)
+        assert result is None
+        ctx.destroy()
+
+    def test_extern_delete_calls_del(self, mock_lib):
+        ctx = Context(_lib=mock_lib)
+        ctx.extern_delete("pipe", "Counter", "ingress/bytes", key=1)
+        mock_lib.p4tc_del.assert_called_once()
+        ctx.destroy()
+
+    def test_extern_insert_no_params(self, mock_lib):
+        ctx = Context(_lib=mock_lib)
+        ctx.extern_insert("pipe", "Counter", "ingress/bytes", key=42)
+        mock_lib.p4tc_create_runt_ext.assert_called_once()
+        ctx.destroy()
+
+    def test_extern_create_failure_raises(self, mock_lib):
+        mock_lib.p4tc_create_runt_ext.return_value = ffi.NULL
+        ctx = Context(_lib=mock_lib)
+        with pytest.raises(EntryError, match="create_runt_ext"):
+            ctx.extern_insert("pipe", "Counter", "ingress/bytes", key=1)
         ctx.destroy()
