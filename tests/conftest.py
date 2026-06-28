@@ -58,6 +58,9 @@ def _make_mock_lib(**overrides):
         "p4tc_del": 0,
         "p4tc_resp_handle": 0,
         "p4tc_dump_handle": 0,
+        "p4tc_subscribe": 1,  # return sub_id=1
+        "p4tc_subscribe_resp_handle": 0,
+        "p4tc_unsubscribe": 0,
     }
     defaults.update(overrides)
 

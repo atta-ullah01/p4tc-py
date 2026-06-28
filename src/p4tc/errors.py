@@ -48,6 +48,11 @@ class CRUDError(P4TCError):
     pass
 
 
+class SubscribeError(P4TCError):
+    """A subscribe or unsubscribe operation failed."""
+    pass
+
+
 def _capture_errno() -> int:
     """Capture current C errno."""
     return ctypes.get_errno()

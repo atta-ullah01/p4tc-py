@@ -3,8 +3,8 @@
 import pytest
 
 from p4tc._ffi import ffi
-from p4tc.context import Context
-from p4tc.errors import EntryError
+from p4tc.context import Context, Subscription
+from p4tc.errors import EntryError, SubscribeError
 from p4tc.types import MsgFlags, Phase
 
 
@@ -234,4 +234,68 @@ class TestExternCRUD:
         ctx = Context(_lib=mock_lib)
         with pytest.raises(EntryError, match="create_runt_ext"):
             ctx.extern_insert("pipe", "Counter", "ingress/bytes", key=1)
+        ctx.destroy()
+
+
+class TestSubscribe:
+    """subscribe/unsubscribe should call the right C functions."""
+
+    def test_subscribe_returns_subscription(self, mock_lib):
+        ctx = Context(_lib=mock_lib)
+        sub = ctx.subscribe("pipe", "ingress/t")
+        assert isinstance(sub, Subscription)
+        assert sub.sub_id == 1
+        mock_lib.p4tc_subscribe.assert_called_once()
+        ctx.destroy()
+
+    def test_subscribe_failure_raises(self, mock_lib):
+        mock_lib.p4tc_subscribe.return_value = -1
+        ctx = Context(_lib=mock_lib)
+        with pytest.raises(SubscribeError, match="subscribe failed"):
+            ctx.subscribe("pipe", "ingress/t")
+        ctx.destroy()
+
+    def test_unsubscribe_calls_c_api(self, mock_lib):
+        ctx = Context(_lib=mock_lib)
+        sub = ctx.subscribe("pipe", "ingress/t")
+        sub.unsubscribe()
+        mock_lib.p4tc_unsubscribe.assert_called_once_with(
+            ctx._ctx, 1)
+        ctx.destroy()
+
+    def test_process_events_calls_resp_handle(self, mock_lib):
+        ctx = Context(_lib=mock_lib)
+        sub = ctx.subscribe("pipe", "ingress/t")
+        sub.process_events()
+        mock_lib.p4tc_subscribe_resp_handle.assert_called_once_with(
+            ctx._ctx, 1)
+        ctx.destroy()
+
+    def test_subscription_context_manager(self, mock_lib):
+        ctx = Context(_lib=mock_lib)
+        with ctx.subscribe("pipe", "ingress/t") as sub:
+            assert sub.sub_id == 1
+        mock_lib.p4tc_unsubscribe.assert_called_once()
+        ctx.destroy()
+
+    def test_destroy_cleans_up_subscriptions(self, mock_lib):
+        ctx = Context(_lib=mock_lib)
+        ctx.subscribe("pipe", "ingress/t")
+        ctx.destroy()
+        mock_lib.p4tc_unsubscribe.assert_called_once()
+
+    def test_subscribe_with_callback(self, mock_lib):
+        received = []
+        ctx = Context(_lib=mock_lib)
+        ctx.subscribe("pipe", "ingress/t",
+                      callback=lambda obj, phase: received.append(phase))
+        mock_lib.p4tc_subscribe.assert_called_once()
+        ctx.destroy()
+
+    def test_unsubscribe_idempotent(self, mock_lib):
+        """Calling unsubscribe twice should not raise."""
+        ctx = Context(_lib=mock_lib)
+        sub = ctx.subscribe("pipe", "ingress/t")
+        sub.unsubscribe()
+        sub.unsubscribe()  # second call is a no-op
         ctx.destroy()

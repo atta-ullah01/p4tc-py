@@ -5,7 +5,7 @@ import pytest
 from p4tc.types import Entity, MsgFlags, ObjType, Phase, Policy, Transport
 from p4tc.errors import (
     P4TCError, ProvisionError, ContextError,
-    ObjectError, KeyError_, EntryError, CRUDError,
+    ObjectError, KeyError_, EntryError, CRUDError, SubscribeError,
 )
 
 
@@ -73,7 +73,7 @@ class TestErrors:
 
     def test_all_subclasses_inherit_base(self):
         for cls in (ProvisionError, ContextError, ObjectError,
-                    KeyError_, EntryError, CRUDError):
+                    KeyError_, EntryError, CRUDError, SubscribeError):
             assert issubclass(cls, P4TCError)
 
     def test_crud_error_carries_errno(self):

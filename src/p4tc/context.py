@@ -6,7 +6,7 @@ from ._ffi import ffi, _require_lib
 from ._schema import _get_schema
 from .errors import (
     ContextError, CRUDError, EntryError, KeyError_, ObjectError,
-    _capture_errno,
+    SubscribeError, _capture_errno,
 )
 from .types import Entity, MsgFlags, ObjType, Phase, Transport
 
@@ -31,6 +31,7 @@ class Context:
         self._responses = []
         self._user_cb = None
         self._aborted = False
+        self._subscriptions = {}  # sub_id -> callback
 
         # Build a cffi callback and store it as an instance attribute so it
         # is kept alive (preventing garbage collection) for as long as the
@@ -100,6 +101,12 @@ class Context:
 
     def destroy(self):
         if self._ctx is not None and self._ctx != ffi.NULL:
+            for sub_id in list(self._subscriptions):
+                try:
+                    self._lib.p4tc_unsubscribe(self._ctx, sub_id)
+                except Exception:
+                    pass
+            self._subscriptions.clear()
             self._lib.p4tc_runt_ctx_destroy(self._ctx)
             self._ctx = None
 
@@ -456,3 +463,110 @@ class Context:
             self._lib.p4tc_obj_destroy(obj)
         self._recv_response(flags, pipeline, f"{kind}/{instance}",
                             "extern_delete")
+
+    def subscribe(self, pipeline, table, *, callback=None, flags=0):
+        """Subscribe to events on a table.
+
+        Returns a Subscription that can be used to process events
+        or unsubscribe.
+
+        *callback(obj_ptr, phase)* is called for each event notification.
+        If not given, events are silently collected in ``_responses``.
+        """
+        lib = self._lib
+        obj = lib.p4tc_obj_create(pipeline.encode(), int(ObjType.TABLE))
+        if obj == ffi.NULL:
+            raise ObjectError(f"obj_create failed for '{pipeline}'",
+                              errno=_capture_errno())
+
+        try:
+            lib.p4tc_obj_objname_set(obj, table.encode())
+
+            # Build a per-subscription callback that forwards to user cb
+            sub_state = {"user_cb": callback}
+
+            def _on_event(obj_ptr, ctx_ptr, cookie_ptr, phase_val):
+                try:
+                    phase = Phase(phase_val)
+                    if phase in (Phase.SOT, Phase.MOT):
+                        if obj_ptr != ffi.NULL:
+                            self._responses.append(obj_ptr)
+                            if sub_state["user_cb"] is not None:
+                                sub_state["user_cb"](obj_ptr, phase)
+                    elif phase == Phase.ABT:
+                        return -1
+                    return 0
+                except Exception:
+                    return -1
+
+            c_cb = ffi.callback(
+                "int(const struct p4tc_obj*, struct p4tc_runt_ctx*,"
+                " uint64_t*, int)",
+                _on_event,
+            )
+
+            sub_id = lib.p4tc_subscribe(self._ctx, obj, int(flags),
+                                        c_cb, ffi.NULL)
+            if sub_id < 0:
+                raise SubscribeError(
+                    f"subscribe failed on '{pipeline}/{table}'",
+                    errno=_capture_errno())
+        finally:
+            lib.p4tc_obj_destroy(obj)
+
+        self._subscriptions[sub_id] = c_cb  # prevent GC
+        return Subscription(self, sub_id)
+
+    def unsubscribe(self, sub_id):
+        """Cancel a subscription by ID."""
+        if sub_id not in self._subscriptions:
+            return
+        ret = self._lib.p4tc_unsubscribe(self._ctx, sub_id)
+        if ret != 0:
+            raise SubscribeError(
+                f"unsubscribe failed for sub_id={sub_id}",
+                errno=_capture_errno())
+        del self._subscriptions[sub_id]
+
+    def process_events(self, sub_id):
+        """Block until the kernel sends events for a subscription.
+
+        Calls p4tc_subscribe_resp_handle which will invoke the
+        subscription's callback for each event received.
+        """
+        ret = self._lib.p4tc_subscribe_resp_handle(self._ctx, sub_id)
+        if ret != 0:
+            raise SubscribeError(
+                f"event processing failed for sub_id={sub_id}",
+                errno=_capture_errno())
+
+
+class Subscription:
+    """Handle returned by Context.subscribe().
+
+    Use as a context manager to auto-unsubscribe::
+
+        with ctx.subscribe('pipe', 'ingress/t', callback=fn) as sub:
+            sub.process_events()
+    """
+
+    def __init__(self, ctx, sub_id):
+        self._ctx = ctx
+        self.sub_id = sub_id
+
+    def process_events(self):
+        """Block and process incoming events for this subscription."""
+        self._ctx.process_events(self.sub_id)
+
+    def unsubscribe(self):
+        """Cancel this subscription."""
+        self._ctx.unsubscribe(self.sub_id)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        self.unsubscribe()
+
+    def __repr__(self):
+        return f"Subscription(sub_id={self.sub_id})"

@@ -19,17 +19,17 @@ Quick start::
 __version__ = "0.1.0"
 
 from ._schema import PipelineSchema
-from .context import Context
+from .context import Context, Subscription
 from .errors import (
     CRUDError, ContextError, EntryError, KeyError_,
-    ObjectError, P4TCError, ProvisionError,
+    ObjectError, P4TCError, ProvisionError, SubscribeError,
 )
 from .provision import PipelineConfig, provision
 from .types import Entity, MsgFlags, ObjType, Phase, Policy, Transport
 
 __all__ = [
-    "provision", "Context", "PipelineConfig", "PipelineSchema",
+    "provision", "Context", "Subscription", "PipelineConfig", "PipelineSchema",
     "Transport", "ObjType", "Entity", "Phase", "MsgFlags", "Policy",
     "P4TCError", "ProvisionError", "ContextError",
-    "ObjectError", "KeyError_", "EntryError", "CRUDError",
+    "ObjectError", "KeyError_", "EntryError", "CRUDError", "SubscribeError",
 ]
