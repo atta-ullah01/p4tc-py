@@ -10,13 +10,19 @@ from p4tc.types import MsgFlags, Phase
 
 
 class TestCallbackSetup:
-    """Context.__init__ should wire up a default cffi callback."""
+    """Default callback is registered lazily on first get/dump/subscribe."""
 
-    def test_registers_callback_on_init(self, mock_lib):
+    def test_no_callback_on_init(self, mock_lib):
         ctx = Context(_lib=mock_lib)
+        mock_lib.p4tc_runt_ctx_dflt_cb_set.assert_not_called()
+        assert ctx._c_callback is None
+        ctx.destroy()
+
+    def test_callback_registered_on_dump(self, mock_lib):
+        ctx = Context(_lib=mock_lib)
+        ctx.dump("pipe", "t")
         mock_lib.p4tc_runt_ctx_dflt_cb_set.assert_called_once()
-        _, cb = mock_lib.p4tc_runt_ctx_dflt_cb_set.call_args[0]
-        assert cb is ctx._c_callback
+        assert ctx._c_callback is not None
         ctx.destroy()
 
     def test_initial_state(self, mock_lib):
@@ -88,11 +94,11 @@ class TestUserCallback:
 class TestResponseHandling:
     """Verify that CRUD methods call p4tc_resp_handle when appropriate."""
 
-    def test_get_calls_resp_handle_by_default(self, mock_lib):
-        """get() defaults to ECHO, so resp_handle should fire."""
+    def test_get_skips_resp_handle_by_default(self, mock_lib):
+        """get() defaults to flags=0, fire-and-forget."""
         ctx = Context(_lib=mock_lib)
         ctx.get("pipe", "ingress/t")
-        mock_lib.p4tc_resp_handle.assert_called_once()
+        mock_lib.p4tc_resp_handle.assert_not_called()
         ctx.destroy()
 
     def test_insert_skips_resp_handle_by_default(self, mock_lib):
@@ -194,7 +200,8 @@ class TestExternCRUD:
         ctx = Context(_lib=mock_lib)
         ctx.extern_insert("pipe", "Counter", "ingress/bytes", key=1)
         # ObjType.EXTERN == 2
-        mock_lib.p4tc_obj_create.assert_called_with(b"pipe", 2)
+        args = mock_lib.p4tc_obj_create.call_args[0]
+        assert args[1] == 2
         ctx.destroy()
 
     def test_extern_update_calls_update(self, mock_lib):
@@ -204,11 +211,10 @@ class TestExternCRUD:
         mock_lib.p4tc_update.assert_called_once()
         ctx.destroy()
 
-    def test_extern_get_calls_resp_handle(self, mock_lib):
+    def test_extern_get_calls_get(self, mock_lib):
         ctx = Context(_lib=mock_lib)
         ctx.extern_get("pipe", "Counter", "ingress/bytes", key=1)
         mock_lib.p4tc_get.assert_called_once()
-        mock_lib.p4tc_resp_handle.assert_called_once()
         ctx.destroy()
 
     def test_extern_get_returns_none(self, mock_lib):

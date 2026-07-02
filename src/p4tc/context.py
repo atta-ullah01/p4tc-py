@@ -33,9 +33,14 @@ class Context:
         self._aborted = False
         self._subscriptions = {}  # sub_id -> callback
 
-        # Build a cffi callback and store it as an instance attribute so it
-        # is kept alive (preventing garbage collection) for as long as the
-        # context exists.
+        # Registered lazily on first get/dump/subscribe.
+        self._c_callback = None
+
+
+    def _ensure_callback(self):
+        """Register the default callback if not done yet."""
+        if self._c_callback is not None:
+            return
         self._c_callback = ffi.callback(
             "int(const struct p4tc_obj*, struct p4tc_runt_ctx*,"
             " uint64_t*, int)",
@@ -44,17 +49,11 @@ class Context:
         self._lib.p4tc_runt_ctx_dflt_cb_set(self._ctx, self._c_callback)
 
 
-
     def _on_response(self, obj_ptr, ctx_ptr, cookie_ptr, phase_val):
-        """Invoked by the C library for every response message.
+        """Default callback invoked by the C library per response.
 
-        The library calls this during ``p4tc_resp_handle`` or
-        ``p4tc_dump_handle``.  We record the raw ``p4tc_obj`` pointers
-        and forward to the user callback if one is set.
-
-        NOTE: the C API currently lacks getter functions, so we cannot
-        extract key/param data from *obj_ptr* yet.  Once upstream adds
-        accessors we will parse them here and return structured objects.
+        Records raw ``p4tc_obj`` pointers and forwards to the user
+        callback.  Structured parsing is pending getter API integration.
         """
         try:
             phase = Phase(phase_val)
@@ -135,16 +134,26 @@ class Context:
         schema = _get_schema(pipeline)
         table_schema = schema.get_table(table) if schema else None
 
-        obj = lib.p4tc_obj_create(pipeline.encode(), int(ObjType.TABLE))
+        # String buffers must outlive the obj (library stores pointers).
+        _keep = []
+
+        pname_buf = ffi.new("char[]", pipeline.encode())
+        _keep.append(pname_buf)
+
+        obj = lib.p4tc_obj_create(pname_buf, int(ObjType.TABLE))
         if obj == ffi.NULL:
             raise ObjectError(f"obj_create failed for '{pipeline}'",
                               errno=_capture_errno())
 
         try:
-            lib.p4tc_obj_objname_set(obj, table.encode())
+            tname_buf = ffi.new("char[]", table.encode())
+            _keep.append(tname_buf)
+            lib.p4tc_obj_objname_set(obj, tname_buf)
 
             if filter_str is not None:
-                lib.p4tc_obj_filter_set(obj, filter_str.encode())
+                fstr_buf = ffi.new("char[]", filter_str.encode())
+                _keep.append(fstr_buf)
+                lib.p4tc_obj_filter_set(obj, fstr_buf)
 
             if key is not None:
                 if isinstance(key, dict):
@@ -156,7 +165,9 @@ class Context:
                     key_values = list(key)
 
                 key_ptrs = [ffi.new("char[]", v.encode()) for v in key_values]
+                _keep.extend(key_ptrs)
                 key_arr = ffi.new("const char *[]", key_ptrs)
+                _keep.append(key_arr)
                 raw_key = lib.p4tc_make_key(obj, len(key_values), key_arr)
                 if raw_key == ffi.NULL:
                     raise KeyError_(f"make_key failed for {key}",
@@ -178,7 +189,8 @@ class Context:
                 ffi.release(tbl_key)
 
                 if action is not None:
-                    self._attach_action(lib, entry, action, table_schema)
+                    self._attach_action(lib, entry, action, table_schema,
+                                        _keep)
 
             elif action is not None:
                 entry = lib.p4tc_alloc_tbl_entry(obj, ffi.NULL,
@@ -191,7 +203,7 @@ class Context:
                                         profile_id=profile_id,
                                         permissions=permissions,
                                         dynamic=dynamic)
-                self._attach_action(lib, entry, action, table_schema)
+                self._attach_action(lib, entry, action, table_schema, _keep)
 
             ret = crud_fn(self._ctx, obj, int(flags), ffi.NULL, ffi.NULL)
             if ret != 0:
@@ -200,6 +212,7 @@ class Context:
             return ret
         finally:
             lib.p4tc_obj_destroy(obj)
+            del _keep
 
     @staticmethod
     def _apply_entry_attrs(lib, entry, *, priority=0, aging_ms=None,
@@ -221,9 +234,8 @@ class Context:
         if dynamic is not None:
             lib.p4tc_runt_tbl_attrs_dyn_set(entry, 1 if dynamic else 0)
 
-    @staticmethod
-    def _attach_action(lib, entry, action, table_schema=None):
-        """Attach an action with its parameters to a table entry."""
+    def _attach_action(self, lib, entry, action, table_schema, _keep):
+        """Parse and attach an action to a table entry."""
         act_path, act_params = action
         if isinstance(act_params, dict):
             if table_schema:
@@ -238,13 +250,16 @@ class Context:
             param_values = list(act_params)
 
         param_ptrs = [ffi.new("char[]", p.encode()) for p in param_values]
+        _keep.extend(param_ptrs)
         param_arr = ffi.new("const char *[]", param_ptrs)
-        act = lib.p4tc_create_runt_act(entry, act_path.encode(),
+        _keep.append(param_arr)
+        act_path_buf = ffi.new("char[]", act_path.encode())
+        _keep.append(act_path_buf)
+        act = lib.p4tc_create_runt_act(entry, act_path_buf,
                                        len(param_values), param_arr)
         if act == ffi.NULL:
             raise EntryError(f"create_runt_act failed for '{act_path}'",
                              errno=_capture_errno())
-
 
 
     def insert(self, pipeline, table, *, key, action,
@@ -259,13 +274,11 @@ class Context:
             permissions: permission bits (CRUDS+XP)
             dynamic:     mark entry as dynamic (bool)
         """
-        self._reset_response_state()
         self._build_and_send(self._lib.p4tc_create, pipeline, table,
                              key=key, action=action, priority=priority,
                              entity=entity, flags=int(flags),
                              aging_ms=aging_ms, profile_id=profile_id,
                              permissions=permissions, dynamic=dynamic)
-        self._recv_response(flags, pipeline, table, "insert")
 
     def update(self, pipeline, table, *, key=None, action=None,
                filter_str=None, priority=0, entity=Entity.TC, flags=0,
@@ -279,32 +292,23 @@ class Context:
             permissions: permission bits (CRUDS+XP)
             dynamic:     mark entry as dynamic (bool)
         """
-        self._reset_response_state()
         self._build_and_send(self._lib.p4tc_update, pipeline, table,
                              key=key, action=action, filter_str=filter_str,
                              priority=priority, entity=entity, flags=int(flags),
                              aging_ms=aging_ms, profile_id=profile_id,
                              permissions=permissions, dynamic=dynamic)
-        self._recv_response(flags, pipeline, table, "update")
 
     def get(self, pipeline, table, *, key=None,
-            filter_str=None, flags=MsgFlags.ECHO, callback=None):
+            filter_str=None, flags=0, callback=None):
         """Read table entries.
 
-        *key* given → single entry.  *key* omitted → all entries.
-        *callback(obj_ptr, phase)* is called for each response object.
-        Returns ``None`` until upstream adds getter functions.
+        *key* given → single entry.  *key* omitted → all entries (dump).
+        The C library prints results to stdout via its internal printer.
+        Returns ``None`` (structured responses coming with getter API).
         """
-        self._reset_response_state()
-        self._user_cb = callback
-        try:
-            self._build_and_send(self._lib.p4tc_get, pipeline, table,
-                                 key=key, filter_str=filter_str,
-                                 flags=int(flags))
-            self._recv_response(flags, pipeline, table, "get")
-        finally:
-            self._user_cb = None
-        # TODO: parse and return Entry objects once C getters land
+        self._build_and_send(self._lib.p4tc_get, pipeline, table,
+                             key=key, filter_str=filter_str,
+                             flags=int(flags))
         return None
 
     def dump(self, pipeline, table, *, filter_str=None, callback=None):
@@ -314,6 +318,7 @@ class Context:
         *callback(obj_ptr, phase)* is called for each entry.
         Returns the number of response objects received.
         """
+        self._ensure_callback()
         self._reset_response_state()
         self._user_cb = callback
         try:
@@ -348,10 +353,8 @@ class Context:
     def delete(self, pipeline, table, *, key=None,
                filter_str=None, flags=0):
         """Delete entry/entries from a table."""
-        self._reset_response_state()
         self._build_and_send(self._lib.p4tc_del, pipeline, table,
                              key=key, filter_str=filter_str, flags=int(flags))
-        self._recv_response(flags, pipeline, table, "delete")
 
     def flush(self, pipeline, table, *, flags=0):
         """Delete all entries from a table."""
@@ -362,10 +365,15 @@ class Context:
                           params=None):
         """Build a p4tc_obj for an extern operation.
 
-        Returns (obj, ext_attrs) — caller must destroy obj when done.
+        Returns (obj, _keep) where _keep pins string buffers.
         """
         lib = self._lib
-        obj = lib.p4tc_obj_create(pipeline.encode(), int(ObjType.EXTERN))
+        _keep = []
+
+        pname_buf = ffi.new("char[]", pipeline.encode())
+        _keep.append(pname_buf)
+
+        obj = lib.p4tc_obj_create(pname_buf, int(ObjType.EXTERN))
         if obj == ffi.NULL:
             raise ObjectError(f"obj_create failed for '{pipeline}'",
                               errno=_capture_errno())
@@ -374,11 +382,18 @@ class Context:
             else list(params or [])
 
         param_ptrs = [ffi.new("char[]", p.encode()) for p in param_values]
+        _keep.extend(param_ptrs)
         param_arr = ffi.new("const char *[]", param_ptrs) \
             if param_ptrs else ffi.NULL
+        if param_arr != ffi.NULL:
+            _keep.append(param_arr)
+
+        kind_buf = ffi.new("char[]", kind.encode())
+        inst_buf = ffi.new("char[]", instance.encode())
+        _keep.extend([kind_buf, inst_buf])
 
         ext = lib.p4tc_create_runt_ext(
-            obj, kind.encode(), instance.encode(),
+            obj, kind_buf, inst_buf,
             key, len(param_values), param_arr,
         )
         if ext == ffi.NULL:
@@ -387,13 +402,13 @@ class Context:
                 f"create_runt_ext failed for '{kind}/{instance}'",
                 errno=_capture_errno())
 
-        return obj
+        return obj, _keep
 
     def extern_insert(self, pipeline, kind, instance, *, key,
                       params=None, flags=0):
         """Create an extern instance entry."""
-        self._reset_response_state()
-        obj = self._build_extern_obj(pipeline, kind, instance, key, params)
+        obj, _keep = self._build_extern_obj(pipeline, kind, instance,
+                                            key, params)
         try:
             ret = self._lib.p4tc_create(self._ctx, obj, int(flags),
                                         ffi.NULL, ffi.NULL)
@@ -403,14 +418,13 @@ class Context:
                     errno=_capture_errno())
         finally:
             self._lib.p4tc_obj_destroy(obj)
-        self._recv_response(flags, pipeline, f"{kind}/{instance}",
-                            "extern_insert")
+            del _keep
 
     def extern_update(self, pipeline, kind, instance, *, key,
                       params=None, flags=0):
         """Update an extern instance entry."""
-        self._reset_response_state()
-        obj = self._build_extern_obj(pipeline, kind, instance, key, params)
+        obj, _keep = self._build_extern_obj(pipeline, kind, instance,
+                                            key, params)
         try:
             ret = self._lib.p4tc_update(self._ctx, obj, int(flags),
                                         ffi.NULL, ffi.NULL)
@@ -420,38 +434,30 @@ class Context:
                     errno=_capture_errno())
         finally:
             self._lib.p4tc_obj_destroy(obj)
-        self._recv_response(flags, pipeline, f"{kind}/{instance}",
-                            "extern_update")
+            del _keep
 
     def extern_get(self, pipeline, kind, instance, *, key,
-                   flags=MsgFlags.ECHO, callback=None):
+                   flags=0):
         """Read an extern instance entry.
 
         Returns None until C getter functions are available upstream.
         """
-        self._reset_response_state()
-        self._user_cb = callback
+        obj, _keep = self._build_extern_obj(pipeline, kind, instance, key)
         try:
-            obj = self._build_extern_obj(pipeline, kind, instance, key)
-            try:
-                ret = self._lib.p4tc_get(self._ctx, obj, int(flags),
-                                         ffi.NULL, ffi.NULL)
-                if ret != 0:
-                    raise CRUDError(
-                        f"extern get failed for '{kind}/{instance}'",
-                        errno=_capture_errno())
-            finally:
-                self._lib.p4tc_obj_destroy(obj)
-            self._recv_response(flags, pipeline, f"{kind}/{instance}",
-                                "extern_get")
+            ret = self._lib.p4tc_get(self._ctx, obj, int(flags),
+                                     ffi.NULL, ffi.NULL)
+            if ret != 0:
+                raise CRUDError(
+                    f"extern get failed for '{kind}/{instance}'",
+                    errno=_capture_errno())
         finally:
-            self._user_cb = None
+            self._lib.p4tc_obj_destroy(obj)
+            del _keep
         return None
 
     def extern_delete(self, pipeline, kind, instance, *, key, flags=0):
         """Delete an extern instance entry."""
-        self._reset_response_state()
-        obj = self._build_extern_obj(pipeline, kind, instance, key)
+        obj, _keep = self._build_extern_obj(pipeline, kind, instance, key)
         try:
             ret = self._lib.p4tc_del(self._ctx, obj, int(flags),
                                      ffi.NULL, ffi.NULL)
@@ -461,8 +467,7 @@ class Context:
                     errno=_capture_errno())
         finally:
             self._lib.p4tc_obj_destroy(obj)
-        self._recv_response(flags, pipeline, f"{kind}/{instance}",
-                            "extern_delete")
+            del _keep
 
     def subscribe(self, pipeline, table, *, callback=None, flags=0):
         """Subscribe to events on a table.
@@ -473,6 +478,7 @@ class Context:
         *callback(obj_ptr, phase)* is called for each event notification.
         If not given, events are silently collected in ``_responses``.
         """
+        self._ensure_callback()
         lib = self._lib
         obj = lib.p4tc_obj_create(pipeline.encode(), int(ObjType.TABLE))
         if obj == ffi.NULL:
