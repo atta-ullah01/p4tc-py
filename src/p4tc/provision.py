@@ -60,10 +60,13 @@ def provision(pipeline_name: str, template_path: str | None = None):
         PipelineConfig — keep alive for CRUD.
     """
     lib = _require_lib()
-    pname = pipeline_name.encode("utf-8")
-    path = template_path.encode("utf-8") if template_path else ffi.NULL
 
-    ptr = lib.p4tc_provision(pname, path)
+    # ffi.new keeps buffers alive; .encode() temporaries get GC'd.
+    pname_buf = ffi.new("char[]", pipeline_name.encode("utf-8"))
+    path_buf = (ffi.new("char[]", template_path.encode("utf-8"))
+                if template_path else ffi.NULL)
+
+    ptr = lib.p4tc_provision(pname_buf, path_buf)
     if ptr == ffi.NULL:
         raise ProvisionError(
             f"Failed to provision '{pipeline_name}'",
@@ -75,4 +78,6 @@ def provision(pipeline_name: str, template_path: str | None = None):
     if schema is not None:
         _register_schema(schema)
 
-    return PipelineConfig(ptr, pipeline_name, schema=schema)
+    cfg = PipelineConfig(ptr, pipeline_name, schema=schema)
+    cfg._keep = [pname_buf, path_buf]  # prevent GC
+    return cfg
