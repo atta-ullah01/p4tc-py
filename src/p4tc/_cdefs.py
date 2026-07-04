@@ -174,4 +174,100 @@ int p4tc_subscribe(struct p4tc_runt_ctx *ctx,
                    uint64_t *cookie);
 int p4tc_subscribe_resp_handle(struct p4tc_runt_ctx *ctx, int sub_id);
 int p4tc_unsubscribe(struct p4tc_runt_ctx *ctx, int sub_id);
+
+/* object accessors */
+const char *p4tc_obj_pname_get(const struct p4tc_obj *p4tc_obj);
+const char *p4tc_obj_objname_get(const struct p4tc_obj *p4tc_obj);
+uint32_t    p4tc_obj_obj_type_get(const struct p4tc_obj *p4tc_obj);
+uint32_t    p4tc_obj_pipeid_get(const struct p4tc_obj *p4tc_obj);
+int         p4tc_obj_cmd_get(const struct p4tc_obj *p4tc_obj);
+uint32_t    p4tc_obj_num_runt_attrs_get(const struct p4tc_obj *p4tc_obj);
+
+/* object iterators */
+struct p4tc_runt_tbl_attrs *
+p4tc_obj_tbl_entry_first(const struct p4tc_obj *p4tc_obj);
+struct p4tc_runt_tbl_attrs *
+p4tc_obj_tbl_entry_next(const struct p4tc_obj *p4tc_obj,
+                        const struct p4tc_runt_tbl_attrs *cur);
+struct p4tc_runt_ext_attrs *
+p4tc_obj_ext_first(const struct p4tc_obj *p4tc_obj);
+struct p4tc_runt_ext_attrs *
+p4tc_obj_ext_next(const struct p4tc_obj *p4tc_obj,
+                  const struct p4tc_runt_ext_attrs *cur);
+
+/* table entry accessors */
+const char *p4tc_runt_tbl_attrs_name_get(const struct p4tc_runt_tbl_attrs *e);
+uint32_t p4tc_runt_tbl_attrs_pipeid_get(const struct p4tc_runt_tbl_attrs *e);
+uint32_t p4tc_runt_tbl_attrs_tblid_get(const struct p4tc_runt_tbl_attrs *e);
+uint32_t p4tc_runt_tbl_attrs_prio_get(const struct p4tc_runt_tbl_attrs *e);
+uint32_t p4tc_runt_tbl_attrs_keysz_get(const struct p4tc_runt_tbl_attrs *e);
+uint32_t p4tc_runt_tbl_attrs_profile_id_get(const struct p4tc_runt_tbl_attrs *e);
+uint64_t p4tc_runt_tbl_attrs_aging_get(const struct p4tc_runt_tbl_attrs *e);
+uint16_t p4tc_runt_tbl_attrs_perms_get(const struct p4tc_runt_tbl_attrs *e);
+uint8_t  p4tc_runt_tbl_attrs_dyn_get(const struct p4tc_runt_tbl_attrs *e);
+int      p4tc_runt_tbl_attrs_num_acts_get(const struct p4tc_runt_tbl_attrs *e);
+int      p4tc_runt_tbl_attrs_num_exts_get(const struct p4tc_runt_tbl_attrs *e);
+const uint8_t *
+p4tc_runt_tbl_attrs_key_get(const struct p4tc_runt_tbl_attrs *e,
+                            uint32_t *keysz);
+const uint8_t *
+p4tc_runt_tbl_attrs_mask_get(const struct p4tc_runt_tbl_attrs *e,
+                             uint32_t *keysz);
+uint64_t p4tc_runt_tbl_attrs_created_get(const struct p4tc_runt_tbl_attrs *e);
+uint64_t p4tc_runt_tbl_attrs_lastused_get(const struct p4tc_runt_tbl_attrs *e);
+uint64_t p4tc_runt_tbl_attrs_firstused_get(const struct p4tc_runt_tbl_attrs *e);
+
+/* table entry action/extern iterators */
+struct p4tc_runt_act_attrs *
+p4tc_runt_tbl_attrs_act_first(const struct p4tc_runt_tbl_attrs *e);
+struct p4tc_runt_act_attrs *
+p4tc_runt_tbl_attrs_act_next(const struct p4tc_runt_tbl_attrs *e,
+                             const struct p4tc_runt_act_attrs *cur);
+struct p4tc_runt_ext_attrs *
+p4tc_runt_tbl_attrs_ext_first(const struct p4tc_runt_tbl_attrs *e);
+struct p4tc_runt_ext_attrs *
+p4tc_runt_tbl_attrs_ext_next(const struct p4tc_runt_tbl_attrs *e,
+                             const struct p4tc_runt_ext_attrs *cur);
+
+/* action accessors */
+const char *p4tc_runt_act_attrs_name_get(const struct p4tc_runt_act_attrs *a);
+uint32_t p4tc_runt_act_attrs_index_get(const struct p4tc_runt_act_attrs *a);
+uint32_t p4tc_runt_act_attrs_num_params_get(const struct p4tc_runt_act_attrs *a);
+int      p4tc_runt_act_attrs_refcnt_get(const struct p4tc_runt_act_attrs *a);
+int      p4tc_runt_act_attrs_bindcnt_get(const struct p4tc_runt_act_attrs *a);
+uint8_t  p4tc_runt_act_attrs_active_get(const struct p4tc_runt_act_attrs *a);
+
+/* action param iterator */
+struct p4tc_runt_param_attrs *
+p4tc_runt_act_attrs_param_first(const struct p4tc_runt_act_attrs *a);
+struct p4tc_runt_param_attrs *
+p4tc_runt_act_attrs_param_next(const struct p4tc_runt_act_attrs *a,
+                               const struct p4tc_runt_param_attrs *cur);
+
+/* extern accessors */
+const char *p4tc_runt_ext_attrs_kind_get(const struct p4tc_runt_ext_attrs *x);
+const char *p4tc_runt_ext_attrs_inst_get(const struct p4tc_runt_ext_attrs *x);
+uint32_t p4tc_runt_ext_attrs_key_get(const struct p4tc_runt_ext_attrs *x);
+uint32_t p4tc_runt_ext_attrs_ext_id_get(const struct p4tc_runt_ext_attrs *x);
+uint32_t p4tc_runt_ext_attrs_inst_id_get(const struct p4tc_runt_ext_attrs *x);
+uint32_t p4tc_runt_ext_attrs_num_params_get(const struct p4tc_runt_ext_attrs *x);
+
+/* extern param iterator */
+struct p4tc_runt_param_attrs *
+p4tc_runt_ext_attrs_param_first(const struct p4tc_runt_ext_attrs *x);
+struct p4tc_runt_param_attrs *
+p4tc_runt_ext_attrs_param_next(const struct p4tc_runt_ext_attrs *x,
+                               const struct p4tc_runt_param_attrs *cur);
+
+/* parameter accessors */
+const char *p4tc_runt_param_attrs_name_get(
+    const struct p4tc_runt_param_attrs *p);
+uint32_t p4tc_runt_param_attrs_id_get(
+    const struct p4tc_runt_param_attrs *p);
+const char *p4tc_runt_param_attrs_type_name_get(
+    const struct p4tc_runt_param_attrs *p);
+_Bool p4tc_runt_param_attrs_is_key_get(
+    const struct p4tc_runt_param_attrs *p);
+const uint8_t *p4tc_runt_param_attrs_value_get(
+    const struct p4tc_runt_param_attrs *p, uint32_t *bytesz);
 """
