@@ -4,6 +4,7 @@ import pytest
 
 from p4tc._ffi import ffi
 from p4tc.context import Context, Subscription
+from p4tc.entry import Action, Param, TableEntry
 from p4tc.errors import EntryError, SubscribeError
 from p4tc.types import MsgFlags, Phase
 
@@ -94,10 +95,11 @@ class TestUserCallback:
 class TestResponseHandling:
     """Verify that CRUD methods call p4tc_resp_handle when appropriate."""
 
-    def test_get_skips_resp_handle_by_default(self, mock_lib):
-        """get() defaults to flags=0, fire-and-forget."""
+    def test_get_calls_p4tc_get_directly(self, mock_lib):
+        """get() builds its own obj and passes a callback to p4tc_get."""
         ctx = Context(_lib=mock_lib)
         ctx.get("pipe", "ingress/t")
+        mock_lib.p4tc_get.assert_called_once()
         mock_lib.p4tc_resp_handle.assert_not_called()
         ctx.destroy()
 
@@ -305,3 +307,215 @@ class TestSubscribe:
         sub.unsubscribe()
         sub.unsubscribe()  # second call is a no-op
         ctx.destroy()
+
+
+class TestParsing:
+    """Verify that getter functions produce correct TableEntry objects."""
+
+    @staticmethod
+    def _stub_getters(lib, *,
+                      table_name=b"ingress/nh_table",
+                      priority=64000,
+                      key_blob=b"\xc0\xa8\x01\x0a",
+                      mask_blob=None,
+                      permissions=0x3CA6,
+                      dynamic=0,
+                      aging=0,
+                      action_name=b"ingress/send_nh",
+                      action_index=1,
+                      params=None):
+        """Wire up mock getters so _parse_entry produces expected data."""
+        # -- table entry pointers --
+        entry_ptr = ffi.cast("void *", 100)
+        act_ptr = ffi.cast("void *", 200)
+
+        # obj iterators: one entry, then NULL
+        lib.p4tc_obj_tbl_entry_first.return_value = entry_ptr
+        lib.p4tc_obj_tbl_entry_next.return_value = ffi.NULL
+
+        # table entry getters
+        tname_buf = ffi.new("char[]", table_name)
+        lib.p4tc_runt_tbl_attrs_name_get.return_value = tname_buf
+        lib.p4tc_runt_tbl_attrs_prio_get.return_value = priority
+        lib.p4tc_runt_tbl_attrs_perms_get.return_value = permissions
+        lib.p4tc_runt_tbl_attrs_dyn_get.return_value = dynamic
+        lib.p4tc_runt_tbl_attrs_aging_get.return_value = aging
+
+        # key blob
+        key_buf = ffi.new("uint8_t[]", key_blob)
+        def _key_get(e, sz_ptr):
+            sz_ptr[0] = len(key_blob)
+            return key_buf
+        lib.p4tc_runt_tbl_attrs_key_get.side_effect = _key_get
+
+        # mask blob
+        if mask_blob is not None:
+            mask_buf = ffi.new("uint8_t[]", mask_blob)
+            def _mask_get(e, sz_ptr):
+                sz_ptr[0] = len(mask_blob)
+                return mask_buf
+            lib.p4tc_runt_tbl_attrs_mask_get.side_effect = _mask_get
+        else:
+            lib.p4tc_runt_tbl_attrs_mask_get.side_effect = \
+                lambda e, sz: ffi.NULL
+
+        # action iterator: one action, then NULL
+        lib.p4tc_runt_tbl_attrs_act_first.return_value = act_ptr
+        lib.p4tc_runt_tbl_attrs_act_next.return_value = ffi.NULL
+
+        # action getters
+        aname_buf = ffi.new("char[]", action_name)
+        lib.p4tc_runt_act_attrs_name_get.return_value = aname_buf
+        lib.p4tc_runt_act_attrs_index_get.return_value = action_index
+
+        # param iterator + getters
+        if params is None:
+            params = [
+                (b"port_id", b"dev", b"\x00\x00\x00\x01"),
+                (b"dmac", b"macaddr", b"\x00\xaa\xbb\xcc\xdd\xee"),
+            ]
+
+        param_ptrs = [ffi.cast("void *", 300 + i)
+                      for i in range(len(params))]
+        # first/next chain
+        lib.p4tc_runt_act_attrs_param_first.return_value = param_ptrs[0]
+        next_map = {}
+        for i in range(len(param_ptrs) - 1):
+            next_map[int(ffi.cast("uintptr_t", param_ptrs[i]))] = \
+                param_ptrs[i + 1]
+        next_map[int(ffi.cast("uintptr_t", param_ptrs[-1]))] = ffi.NULL
+
+        def _param_next(a, cur):
+            addr = int(ffi.cast("uintptr_t", cur))
+            return next_map.get(addr, ffi.NULL)
+        lib.p4tc_runt_act_attrs_param_next.side_effect = _param_next
+
+        # param getters keyed by pointer address
+        name_bufs = [ffi.new("char[]", p[0]) for p in params]
+        type_bufs = [ffi.new("char[]", p[1]) for p in params]
+        val_bufs = [ffi.new("uint8_t[]", p[2]) for p in params]
+        addr_to_idx = {
+            int(ffi.cast("uintptr_t", pp)): i
+            for i, pp in enumerate(param_ptrs)
+        }
+
+        def _pname_get(p):
+            i = addr_to_idx.get(int(ffi.cast("uintptr_t", p)), 0)
+            return name_bufs[i]
+        lib.p4tc_runt_param_attrs_name_get.side_effect = _pname_get
+
+        def _ptype_get(p):
+            i = addr_to_idx.get(int(ffi.cast("uintptr_t", p)), 0)
+            return type_bufs[i]
+        lib.p4tc_runt_param_attrs_type_name_get.side_effect = _ptype_get
+
+        def _pval_get(p, sz_ptr):
+            i = addr_to_idx.get(int(ffi.cast("uintptr_t", p)), 0)
+            sz_ptr[0] = len(params[i][2])
+            return val_bufs[i]
+        lib.p4tc_runt_param_attrs_value_get.side_effect = _pval_get
+
+        # keep references alive for the duration of the test
+        lib._test_refs = [tname_buf, key_buf, aname_buf,
+                          name_bufs, type_bufs, val_bufs, param_ptrs]
+        return entry_ptr
+
+    def test_parse_param(self, mock_lib):
+        self._stub_getters(mock_lib)
+        ctx = Context(_lib=mock_lib)
+        p_ptr = ffi.cast("void *", 300)
+        param = ctx._parse_param(mock_lib, p_ptr)
+        assert param.name == "port_id"
+        assert param.type_name == "dev"
+        assert param.value == b"\x00\x00\x00\x01"
+        assert param.size == 4
+        ctx.destroy()
+
+    def test_parse_action(self, mock_lib):
+        entry_ptr = self._stub_getters(mock_lib)
+        ctx = Context(_lib=mock_lib)
+        a_ptr = ffi.cast("void *", 200)
+        action = ctx._parse_action(mock_lib, a_ptr, entry_ptr)
+        assert action.name == "ingress/send_nh"
+        assert action.index == 1
+        assert "port_id" in action.params
+        assert "dmac" in action.params
+        ctx.destroy()
+
+    def test_parse_entry(self, mock_lib):
+        self._stub_getters(mock_lib)
+        ctx = Context(_lib=mock_lib)
+        entry_ptr = ffi.cast("void *", 100)
+        entry = ctx._parse_entry(mock_lib, entry_ptr)
+        assert entry.table_name == "ingress/nh_table"
+        assert entry.priority == 64000
+        assert entry.key_bytes == b"\xc0\xa8\x01\x0a"
+        assert entry.key_size == 4
+        assert entry.permissions == 0x3CA6
+        assert len(entry.actions) == 1
+        ctx.destroy()
+
+    def test_parse_obj_walks_entries(self, mock_lib):
+        self._stub_getters(mock_lib)
+        ctx = Context(_lib=mock_lib)
+        obj_ptr = ffi.cast("void *", 10)
+        entries = ctx._parse_obj(obj_ptr)
+        assert len(entries) == 1
+        assert isinstance(entries[0], TableEntry)
+        ctx.destroy()
+
+    def test_parse_obj_empty(self, mock_lib):
+        mock_lib.p4tc_obj_tbl_entry_first.return_value = ffi.NULL
+        ctx = Context(_lib=mock_lib)
+        entries = ctx._parse_obj(ffi.cast("void *", 10))
+        assert entries == []
+        ctx.destroy()
+
+    def test_get_returns_table_entry(self, mock_lib):
+        """get() with a key should return a single TableEntry."""
+        from p4tc.types import Phase
+        entry_ptr = self._stub_getters(mock_lib)
+
+        # Make p4tc_get invoke the callback with SOT phase
+        obj_ptr_for_cb = ffi.cast("void *", 10)
+        def _get_with_cb(ctx, obj, flags, cb, cookie):
+            cb(obj_ptr_for_cb, ctx, ffi.NULL, int(Phase.SOT))
+            return 0
+        mock_lib.p4tc_get.side_effect = _get_with_cb
+
+        ctx = Context(_lib=mock_lib)
+        result = ctx.get("pipe", "ingress/nh_table",
+                         key={"srcAddr": "192.168.1.10"})
+        assert isinstance(result, TableEntry)
+        assert result.table_name == "ingress/nh_table"
+        assert result.priority == 64000
+        assert len(result.actions) == 1
+        assert result.actions[0].name == "ingress/send_nh"
+        ctx.destroy()
+
+    def test_get_no_key_returns_list(self, mock_lib):
+        """get() without a key returns a list of entries."""
+        from p4tc.types import Phase
+        self._stub_getters(mock_lib)
+
+        obj_ptr_for_cb = ffi.cast("void *", 10)
+        def _get_with_cb(ctx, obj, flags, cb, cookie):
+            cb(obj_ptr_for_cb, ctx, ffi.NULL, int(Phase.SOT))
+            return 0
+        mock_lib.p4tc_get.side_effect = _get_with_cb
+
+        ctx = Context(_lib=mock_lib)
+        result = ctx.get("pipe", "ingress/nh_table")
+        assert isinstance(result, list)
+        assert len(result) == 1
+        ctx.destroy()
+
+    def test_get_empty_response(self, mock_lib):
+        """get() with key but no response returns None."""
+        mock_lib.p4tc_obj_tbl_entry_first.return_value = ffi.NULL
+        ctx = Context(_lib=mock_lib)
+        result = ctx.get("pipe", "ingress/nh_table",
+                         key={"srcAddr": "192.168.1.10"})
+        assert result is None
+        ctx.destroy()
+

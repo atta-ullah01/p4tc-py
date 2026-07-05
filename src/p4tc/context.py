@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from ._ffi import ffi, _require_lib
 from ._schema import _get_schema
+from .entry import Action, Param, TableEntry
 from .errors import (
     ContextError, CRUDError, EntryError, KeyError_, ObjectError,
     SubscribeError, _capture_errno,
@@ -93,6 +94,83 @@ class Context:
                 )
 
 
+    # response parsing
+
+    @staticmethod
+    def _parse_param(lib, p_ptr):
+        name_ptr = lib.p4tc_runt_param_attrs_name_get(p_ptr)
+        name = ffi.string(name_ptr).decode() if name_ptr != ffi.NULL else ""
+
+        type_ptr = lib.p4tc_runt_param_attrs_type_name_get(p_ptr)
+        type_name = ffi.string(type_ptr).decode() \
+            if type_ptr != ffi.NULL else None
+
+        sz_out = ffi.new("uint32_t *")
+        val_ptr = lib.p4tc_runt_param_attrs_value_get(p_ptr, sz_out)
+        sz = sz_out[0]
+        value = bytes(ffi.buffer(val_ptr, sz)) \
+            if val_ptr != ffi.NULL and sz > 0 else b""
+
+        return Param(name=name, value=value, size=sz, type_name=type_name)
+
+    @staticmethod
+    def _parse_action(lib, a_ptr, entry_ptr):
+        name_ptr = lib.p4tc_runt_act_attrs_name_get(a_ptr)
+        name = ffi.string(name_ptr).decode() if name_ptr != ffi.NULL else ""
+        index = lib.p4tc_runt_act_attrs_index_get(a_ptr)
+
+        params = {}
+        p = lib.p4tc_runt_act_attrs_param_first(a_ptr)
+        while p != ffi.NULL:
+            param = Context._parse_param(lib, p)
+            params[param.name] = param
+            p = lib.p4tc_runt_act_attrs_param_next(a_ptr, p)
+
+        return Action(name=name, index=index, params=params)
+
+    @staticmethod
+    def _parse_entry(lib, e_ptr):
+        name_ptr = lib.p4tc_runt_tbl_attrs_name_get(e_ptr)
+        table_name = ffi.string(name_ptr).decode() \
+            if name_ptr != ffi.NULL else None
+
+        priority = lib.p4tc_runt_tbl_attrs_prio_get(e_ptr)
+
+        keysz_out = ffi.new("uint32_t *")
+        key_ptr = lib.p4tc_runt_tbl_attrs_key_get(e_ptr, keysz_out)
+        key_size = keysz_out[0]
+        key_bytes = bytes(ffi.buffer(key_ptr, key_size)) \
+            if key_ptr != ffi.NULL and key_size > 0 else b""
+
+        mask_ptr = lib.p4tc_runt_tbl_attrs_mask_get(e_ptr, keysz_out)
+        mask_bytes = bytes(ffi.buffer(mask_ptr, keysz_out[0])) \
+            if mask_ptr != ffi.NULL and keysz_out[0] > 0 else None
+
+        permissions = lib.p4tc_runt_tbl_attrs_perms_get(e_ptr)
+        dynamic = bool(lib.p4tc_runt_tbl_attrs_dyn_get(e_ptr))
+        aging = lib.p4tc_runt_tbl_attrs_aging_get(e_ptr)
+
+        actions = []
+        a = lib.p4tc_runt_tbl_attrs_act_first(e_ptr)
+        while a != ffi.NULL:
+            actions.append(Context._parse_action(lib, a, e_ptr))
+            a = lib.p4tc_runt_tbl_attrs_act_next(e_ptr, a)
+
+        return TableEntry(
+            table_name=table_name, priority=priority,
+            key_bytes=key_bytes, key_size=key_size,
+            mask_bytes=mask_bytes, permissions=permissions,
+            dynamic=dynamic, aging=aging, actions=actions,
+        )
+
+    def _parse_obj(self, obj_ptr):
+        lib = self._lib
+        entries = []
+        e = lib.p4tc_obj_tbl_entry_first(obj_ptr)
+        while e != ffi.NULL:
+            entries.append(self._parse_entry(lib, e))
+            e = lib.p4tc_obj_tbl_entry_next(obj_ptr, e)
+        return entries
 
     @property
     def is_valid(self):
@@ -173,8 +251,7 @@ class Context:
                     raise KeyError_(f"make_key failed for {key}",
                                     errno=_capture_errno())
 
-                tbl_key = ffi.gc(raw_key, lib.p4tc_key_destroy)
-
+                # key ownership transfers to obj via alloc_tbl_entry
                 entry = lib.p4tc_alloc_tbl_entry(obj, raw_key,
                                                  0, int(entity))
                 if entry == ffi.NULL:
@@ -185,8 +262,6 @@ class Context:
                                         profile_id=profile_id,
                                         permissions=permissions,
                                         dynamic=dynamic)
-                # key ownership transferred to obj
-                ffi.release(tbl_key)
 
                 if action is not None:
                     self._attach_action(lib, entry, action, table_schema,
@@ -299,17 +374,80 @@ class Context:
                              permissions=permissions, dynamic=dynamic)
 
     def get(self, pipeline, table, *, key=None,
-            filter_str=None, flags=0, callback=None):
+            filter_str=None, flags=0):
         """Read table entries.
 
-        *key* given → single entry.  *key* omitted → all entries (dump).
-        The C library prints results to stdout via its internal printer.
-        Returns ``None`` (structured responses coming with getter API).
+        *key* given → single entry; returns a ``TableEntry`` or ``None``.
+        *key* omitted → all entries; returns a ``list[TableEntry]``.
         """
-        self._build_and_send(self._lib.p4tc_get, pipeline, table,
-                             key=key, filter_str=filter_str,
-                             flags=int(flags))
-        return None
+        captured = []
+
+        def _capture_cb(obj_ptr, ctx_ptr, cookie_ptr, phase_val):
+            try:
+                phase = Phase(phase_val)
+                if phase in (Phase.SOT, Phase.MOT) and obj_ptr != ffi.NULL:
+                    captured.extend(self._parse_obj(obj_ptr))
+                return 0
+            except Exception:
+                return -1
+
+        c_cb = ffi.callback(
+            "int(const struct p4tc_obj*, struct p4tc_runt_ctx*,"
+            " uint64_t*, int)",
+            _capture_cb,
+        )
+
+        lib = self._lib
+        schema = _get_schema(pipeline)
+        table_schema = schema.get_table(table) if schema else None
+        _keep = []
+
+        pname_buf = ffi.new("char[]", pipeline.encode())
+        _keep.append(pname_buf)
+        obj = lib.p4tc_obj_create(pname_buf, int(ObjType.TABLE))
+        if obj == ffi.NULL:
+            raise ObjectError(f"obj_create failed for '{pipeline}'",
+                              errno=_capture_errno())
+
+        try:
+            tname_buf = ffi.new("char[]", table.encode())
+            _keep.append(tname_buf)
+            lib.p4tc_obj_objname_set(obj, tname_buf)
+
+            if key is not None:
+                if isinstance(key, dict):
+                    key_values = table_schema.validate_key(key) \
+                        if table_schema else list(key.values())
+                else:
+                    key_values = list(key)
+
+                key_ptrs = [ffi.new("char[]", v.encode())
+                            for v in key_values]
+                _keep.extend(key_ptrs)
+                key_arr = ffi.new("const char *[]", key_ptrs)
+                _keep.append(key_arr)
+                raw_key = lib.p4tc_make_key(obj, len(key_values), key_arr)
+                if raw_key == ffi.NULL:
+                    raise KeyError_(f"make_key failed for {key}",
+                                   errno=_capture_errno())
+                entry = lib.p4tc_alloc_tbl_entry(obj, raw_key,
+                                                 0, int(Entity.TC))
+                if entry == ffi.NULL:
+                    raise EntryError(
+                        f"alloc_tbl_entry failed for '{table}'",
+                        errno=_capture_errno())
+
+            ret = lib.p4tc_get(self._ctx, obj, int(flags), c_cb, ffi.NULL)
+            if ret != 0:
+                raise CRUDError(f"get failed on '{pipeline}/{table}'",
+                                errno=_capture_errno())
+        finally:
+            lib.p4tc_obj_destroy(obj)
+            del _keep
+
+        if key is not None:
+            return captured[0] if captured else None
+        return captured
 
     def dump(self, pipeline, table, *, filter_str=None, callback=None):
         """Dump all entries from a table.
