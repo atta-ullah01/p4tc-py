@@ -449,44 +449,64 @@ class Context:
             return captured[0] if captured else None
         return captured
 
-    def dump(self, pipeline, table, *, filter_str=None, callback=None):
+    def dump(self, pipeline, table, *, filter_str=None):
         """Dump all entries from a table.
 
-        Uses ``p4tc_dump_handle`` to iterate multi-part responses.
-        *callback(obj_ptr, phase)* is called for each entry.
-        Returns the number of response objects received.
+        Returns a ``list[TableEntry]``.
         """
-        self._ensure_callback()
-        self._reset_response_state()
-        self._user_cb = callback
-        try:
-            lib = self._lib
-            obj = lib.p4tc_obj_create(pipeline.encode(), int(ObjType.TABLE))
-            if obj == ffi.NULL:
-                raise ObjectError(f"obj_create failed for '{pipeline}'",
-                                  errno=_capture_errno())
+        captured = []
+
+        def _capture_cb(obj_ptr, ctx_ptr, cookie_ptr, phase_val):
             try:
-                lib.p4tc_obj_objname_set(obj, table.encode())
-                if filter_str is not None:
-                    lib.p4tc_obj_filter_set(obj, filter_str.encode())
+                phase = Phase(phase_val)
+                if phase in (Phase.SOT, Phase.MOT) and obj_ptr != ffi.NULL:
+                    captured.extend(self._parse_obj(obj_ptr))
+                return 0
+            except Exception:
+                return -1
 
-                ret = lib.p4tc_get(self._ctx, obj,
-                                   int(MsgFlags.ROOT), ffi.NULL, ffi.NULL)
-                if ret != 0:
-                    raise CRUDError(
-                        f"dump send failed on '{pipeline}/{table}'",
-                        errno=_capture_errno())
-            finally:
-                lib.p4tc_obj_destroy(obj)
+        c_cb = ffi.callback(
+            "int(const struct p4tc_obj*, struct p4tc_runt_ctx*,"
+            " uint64_t*, int)",
+            _capture_cb,
+        )
 
-            ret = lib.p4tc_dump_handle(self._ctx, self._c_callback)
-            if ret != 0 or self._aborted:
-                raise CRUDError(f"dump failed on '{pipeline}/{table}'",
-                                errno=_capture_errno())
+        lib = self._lib
+        _keep = []
+
+        pname_buf = ffi.new("char[]", pipeline.encode())
+        _keep.append(pname_buf)
+        obj = lib.p4tc_obj_create(pname_buf, int(ObjType.TABLE))
+        if obj == ffi.NULL:
+            raise ObjectError(f"obj_create failed for '{pipeline}'",
+                              errno=_capture_errno())
+
+        try:
+            tname_buf = ffi.new("char[]", table.encode())
+            _keep.append(tname_buf)
+            lib.p4tc_obj_objname_set(obj, tname_buf)
+
+            if filter_str is not None:
+                filt_buf = ffi.new("char[]", filter_str.encode())
+                _keep.append(filt_buf)
+                lib.p4tc_obj_filter_set(obj, filt_buf)
+
+            ret = lib.p4tc_get(self._ctx, obj,
+                               int(MsgFlags.ROOT), c_cb, ffi.NULL)
+            if ret != 0:
+                raise CRUDError(
+                    f"dump send failed on '{pipeline}/{table}'",
+                    errno=_capture_errno())
         finally:
-            self._user_cb = None
+            lib.p4tc_obj_destroy(obj)
+            del _keep
 
-        return len(self._responses)
+        ret = lib.p4tc_dump_handle(self._ctx, c_cb)
+        if ret != 0:
+            raise CRUDError(f"dump failed on '{pipeline}/{table}'",
+                            errno=_capture_errno())
+
+        return captured
 
     def delete(self, pipeline, table, *, key=None,
                filter_str=None, flags=0):

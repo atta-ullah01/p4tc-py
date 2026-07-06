@@ -19,11 +19,12 @@ class TestCallbackSetup:
         assert ctx._c_callback is None
         ctx.destroy()
 
-    def test_callback_registered_on_dump(self, mock_lib):
+    def test_dump_uses_root_flag(self, mock_lib):
         ctx = Context(_lib=mock_lib)
         ctx.dump("pipe", "t")
-        mock_lib.p4tc_runt_ctx_dflt_cb_set.assert_called_once()
-        assert ctx._c_callback is not None
+        # dump sends p4tc_get with ROOT, then p4tc_dump_handle
+        mock_lib.p4tc_get.assert_called_once()
+        mock_lib.p4tc_dump_handle.assert_called_once()
         ctx.destroy()
 
     def test_initial_state(self, mock_lib):
@@ -519,3 +520,25 @@ class TestParsing:
         assert result is None
         ctx.destroy()
 
+    def test_dump_returns_list(self, mock_lib):
+        self._stub_getters(mock_lib)
+
+        obj_ptr_for_cb = ffi.cast("void *", 10)
+        def _get_with_cb(ctx, obj, flags, cb, cookie):
+            cb(obj_ptr_for_cb, ctx, ffi.NULL, int(Phase.SOT))
+            return 0
+        mock_lib.p4tc_get.side_effect = _get_with_cb
+
+        ctx = Context(_lib=mock_lib)
+        result = ctx.dump("pipe", "ingress/nh_table")
+        assert isinstance(result, list)
+        assert len(result) == 1
+        assert isinstance(result[0], TableEntry)
+        ctx.destroy()
+
+    def test_dump_empty_table(self, mock_lib):
+        mock_lib.p4tc_obj_tbl_entry_first.return_value = ffi.NULL
+        ctx = Context(_lib=mock_lib)
+        result = ctx.dump("pipe", "ingress/nh_table")
+        assert result == []
+        ctx.destroy()
