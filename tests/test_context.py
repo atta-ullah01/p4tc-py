@@ -113,6 +113,47 @@ class TestResponseHandling:
         ctx.destroy()
 
 
+class TestFilter:
+
+    def test_get_with_filter(self, mock_lib):
+        ctx = Context(_lib=mock_lib)
+        ctx.get("pipe", "t", filter_str='param.act.a.p = "v"')
+        mock_lib.p4tc_obj_filter_set.assert_called_once()
+        ctx.destroy()
+
+    def test_get_with_filter_returns_list(self, mock_lib):
+        """filter_str forces list return even if key is also given."""
+        ctx = Context(_lib=mock_lib)
+        result = ctx.get("pipe", "t", key={"k": "v"},
+                         filter_str='param.act.a.p = "v"')
+        assert isinstance(result, list)
+        ctx.destroy()
+
+    def test_update_with_filter(self, mock_lib):
+        ctx = Context(_lib=mock_lib)
+        ctx.update("pipe", "t", action=("a", {"p": "v"}),
+                   filter_str='param.act.a.p = "old"')
+        mock_lib.p4tc_obj_filter_set.assert_called_once()
+        ctx.destroy()
+
+    def test_delete_with_filter(self, mock_lib):
+        ctx = Context(_lib=mock_lib)
+        ctx.delete("pipe", "t", filter_str='param.act.a.port_id = "port0"')
+        mock_lib.p4tc_obj_filter_set.assert_called_once()
+        ctx.destroy()
+
+    def test_dump_with_filter(self, mock_lib):
+        ctx = Context(_lib=mock_lib)
+        ctx.dump("pipe", "t", filter_str='param.act.a.p = "v"')
+        mock_lib.p4tc_obj_filter_set.assert_called_once()
+        ctx.destroy()
+
+    def test_no_filter_by_default(self, mock_lib):
+        ctx = Context(_lib=mock_lib)
+        ctx.get("pipe", "t")
+        mock_lib.p4tc_obj_filter_set.assert_not_called()
+        ctx.destroy()
+
 
 class TestEntryAttributes:
     """Optional kwargs on insert/update should call the right C setters."""

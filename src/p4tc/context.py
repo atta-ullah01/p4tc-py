@@ -414,6 +414,11 @@ class Context:
             _keep.append(tname_buf)
             lib.p4tc_obj_objname_set(obj, tname_buf)
 
+            if filter_str is not None:
+                filt_buf = ffi.new("char[]", filter_str.encode())
+                _keep.append(filt_buf)
+                lib.p4tc_obj_filter_set(obj, filt_buf)
+
             if key is not None:
                 if isinstance(key, dict):
                     key_values = table_schema.validate_key(key) \
@@ -445,7 +450,7 @@ class Context:
             lib.p4tc_obj_destroy(obj)
             del _keep
 
-        if key is not None:
+        if key is not None and filter_str is None:
             return captured[0] if captured else None
         return captured
 
