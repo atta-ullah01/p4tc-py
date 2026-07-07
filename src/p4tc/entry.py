@@ -1,4 +1,4 @@
-"""Structured response types for table entries."""
+"""Structured response types for table and extern entries."""
 
 from __future__ import annotations
 
@@ -49,3 +49,19 @@ class TableEntry:
         act_names = [a.name for a in self.actions]
         return (f"TableEntry({self.table_name!r}, prio={self.priority}, "
                 f"key={self.key_bytes.hex()}, actions={act_names})")
+
+
+@dataclass(frozen=True)
+class ExternEntry:
+
+    kind: str | None
+    instance: str | None
+    key: int
+    ext_id: int = 0
+    inst_id: int = 0
+    params: dict[str, Param] = field(default_factory=dict)
+
+    def __repr__(self):
+        param_names = list(self.params.keys())
+        return (f"ExternEntry({self.kind!r}/{self.instance!r}, "
+                f"key={self.key}, params={param_names})")

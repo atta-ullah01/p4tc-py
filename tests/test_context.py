@@ -4,19 +4,19 @@ import pytest
 
 from p4tc._ffi import ffi
 from p4tc.context import Context, Subscription
-from p4tc.entry import Action, Param, TableEntry
+from p4tc.entry import Action, ExternEntry, Param, TableEntry
 from p4tc.errors import EntryError, SubscribeError
 from p4tc.types import MsgFlags, Phase
 
 
 
 class TestCallbackSetup:
-    """Default callback is registered lazily on first get/dump/subscribe."""
+    """Default callback is registered eagerly on init."""
 
-    def test_no_callback_on_init(self, mock_lib):
+    def test_callback_registered_on_init(self, mock_lib):
         ctx = Context(_lib=mock_lib)
-        mock_lib.p4tc_runt_ctx_dflt_cb_set.assert_not_called()
-        assert ctx._c_callback is None
+        mock_lib.p4tc_runt_ctx_dflt_cb_set.assert_called_once()
+        assert ctx._c_callback is not None
         ctx.destroy()
 
     def test_dump_uses_root_flag(self, mock_lib):
@@ -261,7 +261,8 @@ class TestExternCRUD:
         mock_lib.p4tc_get.assert_called_once()
         ctx.destroy()
 
-    def test_extern_get_returns_none(self, mock_lib):
+    def test_extern_get_empty_returns_none(self, mock_lib):
+        mock_lib.p4tc_obj_ext_first.return_value = ffi.NULL
         ctx = Context(_lib=mock_lib)
         result = ctx.extern_get("pipe", "Counter", "ingress/bytes", key=1)
         assert result is None
@@ -582,4 +583,66 @@ class TestParsing:
         ctx = Context(_lib=mock_lib)
         result = ctx.dump("pipe", "ingress/nh_table")
         assert result == []
+        ctx.destroy()
+
+    @staticmethod
+    def _stub_extern_getters(lib):
+        """Wire mock getters for a single extern entry."""
+        ext_ptr = ffi.cast("void *", 500)
+        lib.p4tc_obj_ext_first.return_value = ext_ptr
+        lib.p4tc_obj_ext_next.return_value = ffi.NULL
+
+        kind_buf = ffi.new("char[]", b"Counter")
+        inst_buf = ffi.new("char[]", b"ingress/bytes")
+        lib.p4tc_runt_ext_attrs_kind_get.return_value = kind_buf
+        lib.p4tc_runt_ext_attrs_inst_get.return_value = inst_buf
+        lib.p4tc_runt_ext_attrs_key_get.return_value = 42
+        lib.p4tc_runt_ext_attrs_ext_id_get.return_value = 1
+        lib.p4tc_runt_ext_attrs_inst_id_get.return_value = 2
+
+        # one param
+        p_ptr = ffi.cast("void *", 600)
+        lib.p4tc_runt_ext_attrs_param_first.return_value = p_ptr
+        lib.p4tc_runt_ext_attrs_param_next.return_value = ffi.NULL
+
+        pname = ffi.new("char[]", b"packets")
+        ptype = ffi.new("char[]", b"bit32")
+        pval = ffi.new("uint8_t[]", b"\x00\x00\x00\x64")
+        lib.p4tc_runt_param_attrs_name_get.side_effect = lambda p: pname
+        lib.p4tc_runt_param_attrs_type_name_get.side_effect = lambda p: ptype
+        def _val_get(p, sz_ptr):
+            sz_ptr[0] = 4
+            return pval
+        lib.p4tc_runt_param_attrs_value_get.side_effect = _val_get
+
+        lib._test_ext_refs = [kind_buf, inst_buf, pname, ptype, pval]
+        return ext_ptr
+
+    def test_parse_extern(self, mock_lib):
+        self._stub_extern_getters(mock_lib)
+        ctx = Context(_lib=mock_lib)
+        x_ptr = ffi.cast("void *", 500)
+        entry = ctx._parse_extern(mock_lib, x_ptr)
+        assert isinstance(entry, ExternEntry)
+        assert entry.kind == "Counter"
+        assert entry.instance == "ingress/bytes"
+        assert entry.key == 42
+        assert "packets" in entry.params
+        assert entry.params["packets"].value == b"\x00\x00\x00\x64"
+        ctx.destroy()
+
+    def test_extern_get_returns_entry(self, mock_lib):
+        self._stub_extern_getters(mock_lib)
+
+        obj_ptr_for_cb = ffi.cast("void *", 10)
+        def _get_with_cb(ctx, obj, flags, cb, cookie):
+            cb(obj_ptr_for_cb, ctx, ffi.NULL, int(Phase.SOT))
+            return 0
+        mock_lib.p4tc_get.side_effect = _get_with_cb
+
+        ctx = Context(_lib=mock_lib)
+        result = ctx.extern_get("pipe", "Counter", "ingress/bytes", key=42)
+        assert isinstance(result, ExternEntry)
+        assert result.kind == "Counter"
+        assert result.key == 42
         ctx.destroy()

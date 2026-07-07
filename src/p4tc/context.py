@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from ._ffi import ffi, _require_lib
 from ._schema import _get_schema
-from .entry import Action, Param, TableEntry
+from .entry import Action, ExternEntry, Param, TableEntry
 from .errors import (
     ContextError, CRUDError, EntryError, KeyError_, ObjectError,
     SubscribeError, _capture_errno,
@@ -34,8 +34,13 @@ class Context:
         self._aborted = False
         self._subscriptions = {}  # sub_id -> callback
 
-        # Registered lazily on first get/dump/subscribe.
-        self._c_callback = None
+        # The C library requires a default callback before any CRUD call.
+        self._c_callback = ffi.callback(
+            "int(const struct p4tc_obj*, struct p4tc_runt_ctx*,"
+            " uint64_t*, int)",
+            self._on_response,
+        )
+        self._lib.p4tc_runt_ctx_dflt_cb_set(self._ctx, self._c_callback)
 
 
     def _ensure_callback(self):
@@ -170,6 +175,39 @@ class Context:
         while e != ffi.NULL:
             entries.append(self._parse_entry(lib, e))
             e = lib.p4tc_obj_tbl_entry_next(obj_ptr, e)
+        return entries
+
+    @staticmethod
+    def _parse_extern(lib, x_ptr):
+        kind_ptr = lib.p4tc_runt_ext_attrs_kind_get(x_ptr)
+        kind = ffi.string(kind_ptr).decode() \
+            if kind_ptr != ffi.NULL else None
+
+        inst_ptr = lib.p4tc_runt_ext_attrs_inst_get(x_ptr)
+        instance = ffi.string(inst_ptr).decode() \
+            if inst_ptr != ffi.NULL else None
+
+        key = lib.p4tc_runt_ext_attrs_key_get(x_ptr)
+        ext_id = lib.p4tc_runt_ext_attrs_ext_id_get(x_ptr)
+        inst_id = lib.p4tc_runt_ext_attrs_inst_id_get(x_ptr)
+
+        params = {}
+        p = lib.p4tc_runt_ext_attrs_param_first(x_ptr)
+        while p != ffi.NULL:
+            param = Context._parse_param(lib, p)
+            params[param.name] = param
+            p = lib.p4tc_runt_ext_attrs_param_next(x_ptr, p)
+
+        return ExternEntry(kind=kind, instance=instance, key=key,
+                           ext_id=ext_id, inst_id=inst_id, params=params)
+
+    def _parse_ext_obj(self, obj_ptr):
+        lib = self._lib
+        entries = []
+        x = lib.p4tc_obj_ext_first(obj_ptr)
+        while x != ffi.NULL:
+            entries.append(self._parse_extern(lib, x))
+            x = lib.p4tc_obj_ext_next(obj_ptr, x)
         return entries
 
     @property
@@ -603,12 +641,29 @@ class Context:
                    flags=0):
         """Read an extern instance entry.
 
-        Returns None until C getter functions are available upstream.
+        Returns an ``ExternEntry`` or ``None``.
         """
+        captured = []
+
+        def _capture_cb(obj_ptr, ctx_ptr, cookie_ptr, phase_val):
+            try:
+                phase = Phase(phase_val)
+                if phase in (Phase.SOT, Phase.MOT) and obj_ptr != ffi.NULL:
+                    captured.extend(self._parse_ext_obj(obj_ptr))
+                return 0
+            except Exception:
+                return -1
+
+        c_cb = ffi.callback(
+            "int(const struct p4tc_obj*, struct p4tc_runt_ctx*,"
+            " uint64_t*, int)",
+            _capture_cb,
+        )
+
         obj, _keep = self._build_extern_obj(pipeline, kind, instance, key)
         try:
             ret = self._lib.p4tc_get(self._ctx, obj, int(flags),
-                                     ffi.NULL, ffi.NULL)
+                                     c_cb, ffi.NULL)
             if ret != 0:
                 raise CRUDError(
                     f"extern get failed for '{kind}/{instance}'",
@@ -616,7 +671,8 @@ class Context:
         finally:
             self._lib.p4tc_obj_destroy(obj)
             del _keep
-        return None
+
+        return captured[0] if captured else None
 
     def extern_delete(self, pipeline, kind, instance, *, key, flags=0):
         """Delete an extern instance entry."""
