@@ -19,12 +19,11 @@ class TestCallbackSetup:
         assert ctx._c_callback is not None
         ctx.destroy()
 
-    def test_dump_uses_root_flag(self, mock_lib):
+    def test_dump_delegates_to_get(self, mock_lib):
         ctx = Context(_lib=mock_lib)
         ctx.dump("pipe", "t")
-        # dump sends p4tc_get with ROOT, then p4tc_dump_handle
         mock_lib.p4tc_get.assert_called_once()
-        mock_lib.p4tc_dump_handle.assert_called_once()
+        mock_lib.p4tc_dump_handle.assert_not_called()
         ctx.destroy()
 
     def test_initial_state(self, mock_lib):
