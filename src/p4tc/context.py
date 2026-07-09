@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import threading
+
 from ._ffi import ffi, _require_lib
 from ._schema import _get_schema
 from .entry import Action, ExternEntry, Param, TableEntry
@@ -32,7 +34,7 @@ class Context:
         self._responses = []
         self._user_cb = None
         self._aborted = False
-        self._subscriptions = {}  # sub_id -> callback
+        self._subscriptions = []
 
         # The C library requires a default callback before any CRUD call.
         self._c_callback = ffi.callback(
@@ -216,11 +218,8 @@ class Context:
 
     def destroy(self):
         if self._ctx is not None and self._ctx != ffi.NULL:
-            for sub_id in list(self._subscriptions):
-                try:
-                    self._lib.p4tc_unsubscribe(self._ctx, sub_id)
-                except Exception:
-                    pass
+            for sub in self._subscriptions:
+                sub.stop()
             self._subscriptions.clear()
             self._lib.p4tc_runt_ctx_destroy(self._ctx)
             self._ctx = None
@@ -637,110 +636,117 @@ class Context:
             self._lib.p4tc_obj_destroy(obj)
             del _keep
 
-    def subscribe(self, pipeline, table, *, callback=None, flags=0):
+    def subscribe(self, pipeline, table, *, callback, filter_str=None):
         """Subscribe to events on a table.
 
-        Returns a Subscription that can be used to process events
-        or unsubscribe.
+        Returns a Subscription that listens in a background thread.
+        Use as a context manager or call start()/stop() manually.
 
-        *callback(obj_ptr, phase)* is called for each event notification.
-        If not given, events are silently collected in ``_responses``.
+        ``callback(entry: TableEntry, phase: Phase)`` is called
+        for each event.
         """
-        self._ensure_callback()
-        lib = self._lib
-        obj = lib.p4tc_obj_create(pipeline.encode(), int(ObjType.TABLE))
-        if obj == ffi.NULL:
-            raise ObjectError(f"obj_create failed for '{pipeline}'",
-                              errno=_capture_errno())
-
-        try:
-            lib.p4tc_obj_objname_set(obj, table.encode())
-
-            # Build a per-subscription callback that forwards to user cb
-            sub_state = {"user_cb": callback}
-
-            def _on_event(obj_ptr, ctx_ptr, cookie_ptr, phase_val):
-                try:
-                    phase = Phase(phase_val)
-                    if phase in (Phase.SOT, Phase.MOT):
-                        if obj_ptr != ffi.NULL:
-                            self._responses.append(obj_ptr)
-                            if sub_state["user_cb"] is not None:
-                                sub_state["user_cb"](obj_ptr, phase)
-                    elif phase == Phase.ABT:
-                        return -1
-                    return 0
-                except Exception:
-                    return -1
-
-            c_cb = ffi.callback(
-                "int(const struct p4tc_obj*, struct p4tc_runt_ctx*,"
-                " uint64_t*, int)",
-                _on_event,
-            )
-
-            sub_id = lib.p4tc_subscribe(self._ctx, obj, int(flags),
-                                        c_cb, ffi.NULL)
-            if sub_id < 0:
-                raise SubscribeError(
-                    f"subscribe failed on '{pipeline}/{table}'",
-                    errno=_capture_errno())
-        finally:
-            lib.p4tc_obj_destroy(obj)
-
-        self._subscriptions[sub_id] = c_cb  # prevent GC
-        return Subscription(self, sub_id)
-
-    def unsubscribe(self, sub_id):
-        """Cancel a subscription by ID."""
-        if sub_id not in self._subscriptions:
-            return
-        ret = self._lib.p4tc_unsubscribe(self._ctx, sub_id)
-        if ret != 0:
-            raise SubscribeError(
-                f"unsubscribe failed for sub_id={sub_id}",
-                errno=_capture_errno())
-        del self._subscriptions[sub_id]
-
-    def process_events(self, sub_id):
-        """Block until the kernel sends events for a subscription.
-
-        Calls p4tc_subscribe_resp_handle which will invoke the
-        subscription's callback for each event received.
-        """
-        ret = self._lib.p4tc_subscribe_resp_handle(self._ctx, sub_id)
-        if ret != 0:
-            raise SubscribeError(
-                f"event processing failed for sub_id={sub_id}",
-                errno=_capture_errno())
+        sub = Subscription(self._lib, self._parse_obj,
+                           pipeline, table, callback, filter_str)
+        self._subscriptions.append(sub)
+        return sub
 
 
 class Subscription:
-    """Handle returned by Context.subscribe().
+    """Background listener for table events.
 
-    Use as a context manager to auto-unsubscribe::
+    Creates its own netlink context so the parent Context can be
+    destroyed independently.
+
+    Use as a context manager::
 
         with ctx.subscribe('pipe', 'ingress/t', callback=fn) as sub:
-            sub.process_events()
+            time.sleep(60)  # fn fires in background
     """
 
-    def __init__(self, ctx, sub_id):
-        self._ctx = ctx
-        self.sub_id = sub_id
+    def __init__(self, lib, parse_obj_fn,
+                 pipeline, table, callback, filter_str=None):
+        self._lib = lib
+        self._parse_obj = parse_obj_fn
+        self._pipeline = pipeline
+        self._table = table
+        self._user_cb = callback
+        self._filter_str = filter_str
+        self._running = False
+        self._thread = None
+        self._c_cb = None
 
-    def process_events(self):
-        """Block and process incoming events for this subscription."""
-        self._ctx.process_events(self.sub_id)
+    @property
+    def active(self):
+        return (self._running
+                and self._thread is not None
+                and self._thread.is_alive())
 
-    def unsubscribe(self):
-        """Cancel this subscription."""
-        self._ctx.unsubscribe(self.sub_id)
+    def start(self):
+        """Start listening in a background thread."""
+        if self._thread is not None and self._thread.is_alive():
+            return
+        self._running = True
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def stop(self):
+        """Signal the listener to stop after the current event batch."""
+        self._running = False
+
+    def _run(self):
+        lib = self._lib
+        user_cb = self._user_cb
+        parse_obj = self._parse_obj
+
+        sub_ctx = lib.p4tc_runt_ctx_create(int(Transport.NETLINK))
+        if sub_ctx == ffi.NULL:
+            return
+
+        @ffi.callback(
+            "int(const struct p4tc_obj*, struct p4tc_runt_ctx*,"
+            " uint64_t*, int)")
+        def _on_event(obj_ptr, ctx_ptr, cookie_ptr, phase_val):
+            try:
+                phase = Phase(phase_val)
+                if phase in (Phase.SOT, Phase.MOT) \
+                        and obj_ptr != ffi.NULL:
+                    for entry in parse_obj(obj_ptr):
+                        user_cb(entry, phase)
+                return 0
+            except Exception:
+                return -1
+
+        self._c_cb = _on_event
+
+        try:
+            while self._running:
+                obj = lib.p4tc_obj_create(
+                    self._pipeline.encode(), int(ObjType.TABLE))
+                if obj == ffi.NULL:
+                    break
+                try:
+                    lib.p4tc_obj_objname_set(
+                        obj, self._table.encode())
+                    if self._filter_str:
+                        filt = ffi.new(
+                            "char[]", self._filter_str.encode())
+                        lib.p4tc_obj_filter_set(obj, filt)
+                    lib.p4tc_subscribe(
+                        sub_ctx, obj, 0,
+                        _on_event, ffi.NULL)
+                finally:
+                    lib.p4tc_obj_destroy(obj)
+        finally:
+            lib.p4tc_runt_ctx_destroy(sub_ctx)
 
     def __enter__(self):
+        self.start()
         return self
 
     def __exit__(self, *args):
-        self.unsubscribe()
+        self.stop()
 
     def __repr__(self):
-        return f"Subscription(sub_id={self.sub_id})"
+        state = "active" if self.active else "stopped"
+        return f"Subscription({self._table!r}, {state})"
+

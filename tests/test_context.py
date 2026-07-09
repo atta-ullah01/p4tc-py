@@ -288,66 +288,67 @@ class TestExternCRUD:
 
 
 class TestSubscribe:
-    """subscribe/unsubscribe should call the right C functions."""
+    """subscribe should return a thread-based Subscription."""
 
     def test_subscribe_returns_subscription(self, mock_lib):
         ctx = Context(_lib=mock_lib)
-        sub = ctx.subscribe("pipe", "ingress/t")
+        sub = ctx.subscribe("pipe", "ingress/t",
+                            callback=lambda e, p: None)
         assert isinstance(sub, Subscription)
-        assert sub.sub_id == 1
-        mock_lib.p4tc_subscribe.assert_called_once()
+        assert not sub.active
         ctx.destroy()
 
-    def test_subscribe_failure_raises(self, mock_lib):
-        mock_lib.p4tc_subscribe.return_value = -1
+    def test_subscribe_tracked_by_context(self, mock_lib):
         ctx = Context(_lib=mock_lib)
-        with pytest.raises(SubscribeError, match="subscribe failed"):
-            ctx.subscribe("pipe", "ingress/t")
+        sub = ctx.subscribe("pipe", "ingress/t",
+                            callback=lambda e, p: None)
+        assert sub in ctx._subscriptions
         ctx.destroy()
 
-    def test_unsubscribe_calls_c_api(self, mock_lib):
+    def test_stop_sets_running_false(self, mock_lib):
         ctx = Context(_lib=mock_lib)
-        sub = ctx.subscribe("pipe", "ingress/t")
-        sub.unsubscribe()
-        mock_lib.p4tc_unsubscribe.assert_called_once_with(
-            ctx._ctx, 1)
+        sub = ctx.subscribe("pipe", "ingress/t",
+                            callback=lambda e, p: None)
+        sub._running = True
+        sub.stop()
+        assert not sub._running
         ctx.destroy()
 
-    def test_process_events_calls_resp_handle(self, mock_lib):
+    def test_context_manager_calls_start_stop(self, mock_lib):
         ctx = Context(_lib=mock_lib)
-        sub = ctx.subscribe("pipe", "ingress/t")
-        sub.process_events()
-        mock_lib.p4tc_subscribe_resp_handle.assert_called_once_with(
-            ctx._ctx, 1)
+        sub = ctx.subscribe("pipe", "ingress/t",
+                            callback=lambda e, p: None)
+        # Patch start/stop to verify they're called
+        started = []
+        stopped = []
+        sub.start = lambda: started.append(True)
+        sub.stop = lambda: stopped.append(True)
+        with sub:
+            assert len(started) == 1
+        assert len(stopped) == 1
         ctx.destroy()
 
-    def test_subscription_context_manager(self, mock_lib):
+    def test_destroy_stops_subscriptions(self, mock_lib):
         ctx = Context(_lib=mock_lib)
-        with ctx.subscribe("pipe", "ingress/t") as sub:
-            assert sub.sub_id == 1
-        mock_lib.p4tc_unsubscribe.assert_called_once()
+        sub = ctx.subscribe("pipe", "ingress/t",
+                            callback=lambda e, p: None)
+        sub._running = True
+        ctx.destroy()
+        assert not sub._running
+
+    def test_subscribe_with_filter(self, mock_lib):
+        ctx = Context(_lib=mock_lib)
+        sub = ctx.subscribe("pipe", "ingress/t",
+                            callback=lambda e, p: None,
+                            filter_str="key.srcAddr = \"1.2.3.4\"")
+        assert sub._filter_str == 'key.srcAddr = "1.2.3.4"'
         ctx.destroy()
 
-    def test_destroy_cleans_up_subscriptions(self, mock_lib):
+    def test_repr(self, mock_lib):
         ctx = Context(_lib=mock_lib)
-        ctx.subscribe("pipe", "ingress/t")
-        ctx.destroy()
-        mock_lib.p4tc_unsubscribe.assert_called_once()
-
-    def test_subscribe_with_callback(self, mock_lib):
-        received = []
-        ctx = Context(_lib=mock_lib)
-        ctx.subscribe("pipe", "ingress/t",
-                      callback=lambda obj, phase: received.append(phase))
-        mock_lib.p4tc_subscribe.assert_called_once()
-        ctx.destroy()
-
-    def test_unsubscribe_idempotent(self, mock_lib):
-        """Calling unsubscribe twice should not raise."""
-        ctx = Context(_lib=mock_lib)
-        sub = ctx.subscribe("pipe", "ingress/t")
-        sub.unsubscribe()
-        sub.unsubscribe()  # second call is a no-op
+        sub = ctx.subscribe("pipe", "ingress/t",
+                            callback=lambda e, p: None)
+        assert "stopped" in repr(sub)
         ctx.destroy()
 
 
