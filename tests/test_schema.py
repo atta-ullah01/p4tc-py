@@ -5,7 +5,8 @@ import json
 import pytest
 
 from p4tc._schema import (
-    ActionSchema, KeyFieldSchema, ParamSchema,
+    ActionSchema, ExternInstanceSchema, ExternSchema,
+    KeyFieldSchema, ParamSchema,
     PipelineSchema, TableSchema, load_pipeline_schema,
 )
 
@@ -25,6 +26,22 @@ SAMPLE_PIPELINE_JSON = {
                 {"id": 1, "name": "port_id", "type": "dev", "bitwidth": 32},
                 {"id": 2, "name": "dmac", "type": "macaddr", "bitwidth": 48},
                 {"id": 3, "name": "smac", "type": "macaddr", "bitwidth": 48},
+            ],
+        }],
+    }],
+    "externs": [{
+        "name": "Register",
+        "id": "0x1",
+        "instances": [{
+            "inst_name": "ingress.reg1",
+            "inst_id": 1,
+            "params": [
+                {"id": 1, "name": "index", "type": "bit32",
+                 "attr": "tc_key", "bitwidth": 32},
+                {"id": 2, "name": "protocol", "type": "bit8",
+                 "attr": "param", "bitwidth": 8},
+                {"id": 3, "name": "aux", "type": "bit8",
+                 "attr": "param", "bitwidth": 8},
             ],
         }],
     }],
@@ -58,7 +75,7 @@ def _build_schema():
             keysize=tbl.get("keysize", 0),
             key_fields=key_fields, actions=actions,
         )
-    return PipelineSchema(name="test_pipe", tables=tables)
+    return PipelineSchema(name="test_pipe", tables=tables, externs={})
 
 
 class TestPipelineSchema:
@@ -134,3 +151,53 @@ class TestSchemaFileLoading:
 
     def test_missing_file_returns_none(self, tmp_path):
         assert load_pipeline_schema("nope", str(tmp_path)) is None
+
+    def test_loads_via_introspection_env(self, tmp_path, monkeypatch):
+        (tmp_path / "test_pipe.json").write_text(
+            json.dumps(SAMPLE_PIPELINE_JSON))
+        monkeypatch.setenv("INTROSPECTION", str(tmp_path))
+        s = load_pipeline_schema("test_pipe")
+        assert s is not None
+        assert "Register" in s.externs
+
+
+class TestExternSchema:
+    def test_extern_parsed_from_json(self, tmp_path):
+        (tmp_path / "test_pipe.json").write_text(
+            json.dumps(SAMPLE_PIPELINE_JSON))
+        s = load_pipeline_schema("test_pipe", str(tmp_path))
+        assert "Register" in s.externs
+        ext = s.get_extern("Register")
+        assert ext.id == "0x1"
+
+    def test_instance_lookup(self, tmp_path):
+        (tmp_path / "test_pipe.json").write_text(
+            json.dumps(SAMPLE_PIPELINE_JSON))
+        s = load_pipeline_schema("test_pipe", str(tmp_path))
+        inst = s.get_extern("Register").get_instance("ingress.reg1")
+        assert inst is not None
+        assert inst.id == 1
+
+    def test_param_names_exclude_keys(self, tmp_path):
+        (tmp_path / "test_pipe.json").write_text(
+            json.dumps(SAMPLE_PIPELINE_JSON))
+        s = load_pipeline_schema("test_pipe", str(tmp_path))
+        inst = s.get_extern("Register").get_instance("ingress.reg1")
+        assert inst.param_names == ("protocol", "aux")
+        assert "index" not in inst.param_names
+
+    def test_nonexistent_extern_returns_none(self, tmp_path):
+        (tmp_path / "test_pipe.json").write_text(
+            json.dumps(SAMPLE_PIPELINE_JSON))
+        s = load_pipeline_schema("test_pipe", str(tmp_path))
+        assert s.get_extern("NoSuchExtern") is None
+
+    def test_nonexistent_instance_returns_none(self, tmp_path):
+        (tmp_path / "test_pipe.json").write_text(
+            json.dumps(SAMPLE_PIPELINE_JSON))
+        s = load_pipeline_schema("test_pipe", str(tmp_path))
+        assert s.get_extern("Register").get_instance("no.inst") is None
+
+    def test_pipeline_without_externs(self):
+        s = PipelineSchema(name="bare", tables={}, externs={})
+        assert s.get_extern("Register") is None
