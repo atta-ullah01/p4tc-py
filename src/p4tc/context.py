@@ -527,29 +527,59 @@ class Context:
             raise ObjectError(f"obj_create failed for '{pipeline}'",
                               errno=_capture_errno())
 
-        param_values = list(params.values()) if isinstance(params, dict) \
-            else list(params or [])
-
-        param_ptrs = [ffi.new("char[]", p.encode()) for p in param_values]
-        _keep.extend(param_ptrs)
-        param_arr = ffi.new("const char *[]", param_ptrs) \
-            if param_ptrs else ffi.NULL
-        if param_arr != ffi.NULL:
-            _keep.append(param_arr)
-
         kind_buf = ffi.new("char[]", kind.encode())
         inst_buf = ffi.new("char[]", instance.encode())
         _keep.extend([kind_buf, inst_buf])
 
-        ext = lib.p4tc_create_runt_ext(
-            obj, kind_buf, inst_buf,
-            key, len(param_values), param_arr,
-        )
-        if ext == ffi.NULL:
-            lib.p4tc_obj_destroy(obj)
-            raise EntryError(
-                f"create_runt_ext failed for '{kind}/{instance}'",
-                errno=_capture_errno())
+        param_values = list(params.values()) if isinstance(params, dict) \
+            else list(params or [])
+
+        if param_values:
+            param_ptrs = [ffi.new("char[]", p.encode())
+                          for p in param_values]
+            _keep.extend(param_ptrs)
+            param_arr = ffi.new("const char *[]", param_ptrs)
+            _keep.append(param_arr)
+
+            ext = lib.p4tc_create_runt_ext(
+                obj, kind_buf, inst_buf,
+                key, len(param_values), param_arr,
+            )
+            if ext == ffi.NULL:
+                lib.p4tc_obj_destroy(obj)
+                raise EntryError(
+                    f"create_runt_ext failed for '{kind}/{instance}'",
+                    errno=_capture_errno())
+        else:
+            # p4tc_create_runt_ext requires params for internal setup,
+            # even for GET/DELETE.  Look up the count from the schema.
+            schema = _get_schema(pipeline)
+            n_dummy = 0
+            if schema:
+                ext_schema = schema.get_extern(kind)
+                if ext_schema:
+                    inst_schema = ext_schema.get_instance(instance)
+                    if inst_schema:
+                        n_dummy = len(inst_schema.param_names)
+
+            if n_dummy > 0:
+                dummy_ptrs = [ffi.new("char[]", b"0")
+                              for _ in range(n_dummy)]
+                _keep.extend(dummy_ptrs)
+                dummy_arr = ffi.new("const char *[]", dummy_ptrs)
+                _keep.append(dummy_arr)
+            else:
+                dummy_arr = ffi.NULL
+
+            ext = lib.p4tc_create_runt_ext(
+                obj, kind_buf, inst_buf,
+                key, n_dummy, dummy_arr,
+            )
+            if ext == ffi.NULL:
+                lib.p4tc_obj_destroy(obj)
+                raise EntryError(
+                    f"create_runt_ext failed for '{kind}/{instance}'",
+                    errno=_capture_errno())
 
         return obj, _keep
 

@@ -6,6 +6,7 @@ structure. Used to validate dict keys and action params.
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -72,14 +73,37 @@ class TableSchema:
         return self.actions.get(action_path)
 
 
+@dataclass(frozen=True)
+class ExternInstanceSchema:
+    """Schema for an extern instance."""
+    name: str
+    id: int
+    param_names: tuple[str, ...]  # data params only (not keys)
+
+
+@dataclass(frozen=True)
+class ExternSchema:
+    """Schema for an extern kind with its instances."""
+    name: str
+    id: str
+    instances: dict[str, ExternInstanceSchema]
+
+    def get_instance(self, inst_name: str):
+        return self.instances.get(inst_name)
+
+
 @dataclass
 class PipelineSchema:
     """Full schema for a provisioned pipeline."""
     name: str
     tables: dict[str, TableSchema]
+    externs: dict[str, ExternSchema]  # keyed by kind name
 
     def get_table(self, table_path: str):
         return self.tables.get(table_path)
+
+    def get_extern(self, kind: str):
+        return self.externs.get(kind)
 
 
 # module-level registry, populated by provision()
@@ -106,7 +130,12 @@ def load_pipeline_schema(pipeline_name, template_path=None):
     if template_path:
         json_path = Path(template_path) / f"{pipeline_name}.json"
     else:
-        json_path = Path(f"{pipeline_name}.json")
+        # Fall back to INTROSPECTION env var, then cwd.
+        introspection = os.environ.get("INTROSPECTION")
+        if introspection:
+            json_path = Path(introspection) / f"{pipeline_name}.json"
+        else:
+            json_path = Path(f"{pipeline_name}.json")
 
     if not json_path.exists():
         return None
@@ -142,4 +171,24 @@ def load_pipeline_schema(pipeline_name, template_path=None):
             key_fields=key_fields, actions=actions,
         )
 
-    return PipelineSchema(name=pipeline_name, tables=tables)
+    externs = {}
+    for ext in data.get("externs", []):
+        instances = {}
+        for inst in ext.get("instances", []):
+            # data params only (attr == "param"), not keys (attr == "tc_key")
+            param_names = tuple(
+                p["name"] for p in inst.get("params", [])
+                if p.get("attr") == "param"
+            )
+            instances[inst["inst_name"]] = ExternInstanceSchema(
+                name=inst["inst_name"],
+                id=inst.get("inst_id", 0),
+                param_names=param_names,
+            )
+        externs[ext["name"]] = ExternSchema(
+            name=ext["name"], id=ext.get("id", "0"),
+            instances=instances,
+        )
+
+    return PipelineSchema(name=pipeline_name, tables=tables,
+                          externs=externs)
