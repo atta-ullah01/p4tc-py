@@ -21,7 +21,7 @@ class TestCallbackSetup:
 
     def test_dump_delegates_to_get(self, mock_lib):
         ctx = Context(_lib=mock_lib)
-        ctx.dump("pipe", "t")
+        ctx.dump("pipe", "t", callback=lambda e, p: None)
         mock_lib.p4tc_get.assert_called_once()
         mock_lib.p4tc_dump_handle.assert_not_called()
         ctx.destroy()
@@ -98,7 +98,7 @@ class TestResponseHandling:
     def test_get_calls_p4tc_get_directly(self, mock_lib):
         """get() builds its own obj and passes a callback to p4tc_get."""
         ctx = Context(_lib=mock_lib)
-        ctx.get("pipe", "ingress/t")
+        ctx.get("pipe", "ingress/t", callback=lambda e, p: None)
         mock_lib.p4tc_get.assert_called_once()
         mock_lib.p4tc_resp_handle.assert_not_called()
         ctx.destroy()
@@ -116,16 +116,17 @@ class TestFilter:
 
     def test_get_with_filter(self, mock_lib):
         ctx = Context(_lib=mock_lib)
-        ctx.get("pipe", "t", filter_str='param.act.a.p = "v"')
+        ctx.get("pipe", "t", filter_str='param.act.a.p = "v"', callback=lambda e, p: None)
         mock_lib.p4tc_obj_filter_set.assert_called_once()
         ctx.destroy()
 
     def test_get_with_filter_returns_list(self, mock_lib):
         """filter_str forces list return even if key is also given."""
         ctx = Context(_lib=mock_lib)
-        result = ctx.get("pipe", "t", key={"k": "v"},
-                         filter_str='param.act.a.p = "v"')
-        assert isinstance(result, list)
+        captured = []
+        ctx.get("pipe", "t", key={"k": "v"},
+                filter_str='param.act.a.p = "v"', callback=lambda e, p: captured.extend(e))
+        assert isinstance(captured, list)
         ctx.destroy()
 
     def test_update_with_filter(self, mock_lib):
@@ -143,13 +144,13 @@ class TestFilter:
 
     def test_dump_with_filter(self, mock_lib):
         ctx = Context(_lib=mock_lib)
-        ctx.dump("pipe", "t", filter_str='param.act.a.p = "v"')
+        ctx.dump("pipe", "t", filter_str='param.act.a.p = "v"', callback=lambda e, p: None)
         mock_lib.p4tc_obj_filter_set.assert_called_once()
         ctx.destroy()
 
     def test_no_filter_by_default(self, mock_lib):
         ctx = Context(_lib=mock_lib)
-        ctx.get("pipe", "t")
+        ctx.get("pipe", "t", callback=lambda e, p: None)
         mock_lib.p4tc_obj_filter_set.assert_not_called()
         ctx.destroy()
 
@@ -256,15 +257,16 @@ class TestExternCRUD:
 
     def test_extern_get_calls_get(self, mock_lib):
         ctx = Context(_lib=mock_lib)
-        ctx.extern_get("pipe", "Counter", "ingress/bytes", key=1)
+        ctx.extern_get("pipe", "Counter", "ingress/bytes", key=1, callback=lambda e, p: None)
         mock_lib.p4tc_get.assert_called_once()
         ctx.destroy()
 
     def test_extern_get_empty_returns_none(self, mock_lib):
         mock_lib.p4tc_obj_ext_first.return_value = ffi.NULL
         ctx = Context(_lib=mock_lib)
-        result = ctx.extern_get("pipe", "Counter", "ingress/bytes", key=1)
-        assert result is None
+        captured = []
+        ctx.extern_get("pipe", "Counter", "ingress/bytes", key=1, callback=lambda e, p: captured.extend(e))
+        assert len(captured) == 0
         ctx.destroy()
 
     def test_extern_delete_calls_del(self, mock_lib):
@@ -527,8 +529,11 @@ class TestParsing:
         mock_lib.p4tc_get.side_effect = _get_with_cb
 
         ctx = Context(_lib=mock_lib)
-        result = ctx.get("pipe", "ingress/nh_table",
-                         key={"srcAddr": "192.168.1.10"})
+        captured = []
+        ctx.get("pipe", "ingress/nh_table",
+                key={"srcAddr": "192.168.1.10"}, callback=lambda e, p: captured.extend(e))
+        assert len(captured) == 1
+        result = captured[0]
         assert isinstance(result, TableEntry)
         assert result.table_name == "ingress/nh_table"
         assert result.priority == 64000
@@ -548,18 +553,20 @@ class TestParsing:
         mock_lib.p4tc_get.side_effect = _get_with_cb
 
         ctx = Context(_lib=mock_lib)
-        result = ctx.get("pipe", "ingress/nh_table")
-        assert isinstance(result, list)
-        assert len(result) == 1
+        captured = []
+        ctx.get("pipe", "ingress/nh_table", callback=lambda e, p: captured.extend(e))
+        assert isinstance(captured, list)
+        assert len(captured) == 1
         ctx.destroy()
 
     def test_get_empty_response(self, mock_lib):
         """get() with key but no response returns None."""
         mock_lib.p4tc_obj_tbl_entry_first.return_value = ffi.NULL
         ctx = Context(_lib=mock_lib)
-        result = ctx.get("pipe", "ingress/nh_table",
-                         key={"srcAddr": "192.168.1.10"})
-        assert result is None
+        captured = []
+        ctx.get("pipe", "ingress/nh_table",
+                key={"srcAddr": "192.168.1.10"}, callback=lambda e, p: captured.extend(e))
+        assert len(captured) == 0
         ctx.destroy()
 
     def test_dump_returns_list(self, mock_lib):
@@ -572,17 +579,19 @@ class TestParsing:
         mock_lib.p4tc_get.side_effect = _get_with_cb
 
         ctx = Context(_lib=mock_lib)
-        result = ctx.dump("pipe", "ingress/nh_table")
-        assert isinstance(result, list)
-        assert len(result) == 1
-        assert isinstance(result[0], TableEntry)
+        captured = []
+        ctx.dump("pipe", "ingress/nh_table", callback=lambda e, p: captured.extend(e))
+        assert isinstance(captured, list)
+        assert len(captured) == 1
+        assert isinstance(captured[0], TableEntry)
         ctx.destroy()
 
     def test_dump_empty_table(self, mock_lib):
         mock_lib.p4tc_obj_tbl_entry_first.return_value = ffi.NULL
         ctx = Context(_lib=mock_lib)
-        result = ctx.dump("pipe", "ingress/nh_table")
-        assert result == []
+        captured = []
+        ctx.dump("pipe", "ingress/nh_table", callback=lambda e, p: captured.extend(e))
+        assert captured == []
         ctx.destroy()
 
     @staticmethod
@@ -641,7 +650,10 @@ class TestParsing:
         mock_lib.p4tc_get.side_effect = _get_with_cb
 
         ctx = Context(_lib=mock_lib)
-        result = ctx.extern_get("pipe", "Counter", "ingress/bytes", key=42)
+        captured = []
+        ctx.extern_get("pipe", "Counter", "ingress/bytes", key=42, callback=lambda e, p: captured.extend(e))
+        assert len(captured) == 1
+        result = captured[0]
         assert isinstance(result, ExternEntry)
         assert result.kind == "Counter"
         assert result.key == 42

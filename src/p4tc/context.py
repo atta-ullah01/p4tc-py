@@ -243,7 +243,8 @@ class Context:
                         key=None, action=None, filter_str=None,
                         flags=0, priority=0, entity=Entity.TC,
                         aging_ms=None, profile_id=None,
-                        permissions=None, dynamic=None):
+                        permissions=None, dynamic=None,
+                        callback=None):
         """Build a ``p4tc_obj``, attach key/action, and fire the CRUD call."""
         lib = self._lib
         schema = _get_schema(pipeline)
@@ -317,7 +318,26 @@ class Context:
                                         dynamic=dynamic)
                 self._attach_action(lib, entry, action, table_schema, _keep)
 
-            ret = crud_fn(self._ctx, obj, int(flags), ffi.NULL, ffi.NULL)
+            if callback is not None:
+                def _on_resp(obj_ptr, ctx_ptr, cookie_ptr, phase_val):
+                    try:
+                        phase = Phase(phase_val)
+                        if phase in (Phase.SOT, Phase.MOT) and obj_ptr != ffi.NULL:
+                            callback(self._parse_obj(obj_ptr), phase)
+                        return 0
+                    except Exception:
+                        return -1
+
+                c_cb = ffi.callback(
+                    "int(const struct p4tc_obj*, struct p4tc_runt_ctx*,"
+                    " uint64_t*, int)",
+                    _on_resp,
+                )
+                _keep.append(c_cb)
+                ret = crud_fn(self._ctx, obj, int(flags), c_cb, ffi.NULL)
+            else:
+                ret = crud_fn(self._ctx, obj, int(flags), ffi.NULL, ffi.NULL)
+
             if ret != 0:
                 raise CRUDError(f"CRUD failed on '{pipeline}/{table}'",
                                 errno=_capture_errno())
@@ -377,26 +397,22 @@ class Context:
     def insert(self, pipeline, table, *, key, action,
                priority=0, entity=Entity.TC, flags=0,
                aging_ms=None, profile_id=None,
-               permissions=None, dynamic=None):
-        """Create a new table entry.
-
-        Optional entry attributes:
-            aging_ms:    entry aging timeout in milliseconds
-            profile_id:  profile identifier
-            permissions: permission bits (CRUDS+XP)
-            dynamic:     mark entry as dynamic (bool)
-        """
+               permissions=None, dynamic=None, callback=None):
+        """Create a new table entry."""
         self._build_and_send(self._lib.p4tc_create, pipeline, table,
                              key=key, action=action, priority=priority,
                              entity=entity, flags=int(flags),
                              aging_ms=aging_ms, profile_id=profile_id,
-                             permissions=permissions, dynamic=dynamic)
+                             permissions=permissions, dynamic=dynamic,
+                             callback=callback)
 
     def update(self, pipeline, table, *, key=None, action=None,
                filter_str=None, priority=0, entity=Entity.TC, flags=0,
                aging_ms=None, profile_id=None,
-               permissions=None, dynamic=None):
+               permissions=None, dynamic=None, callback=None):
         """Update an existing table entry.
+
+        Must provide *either* `key` or `filter_str`.
 
         Optional entry attributes:
             aging_ms:    entry aging timeout in milliseconds
@@ -408,22 +424,20 @@ class Context:
                              key=key, action=action, filter_str=filter_str,
                              priority=priority, entity=entity, flags=int(flags),
                              aging_ms=aging_ms, profile_id=profile_id,
-                             permissions=permissions, dynamic=dynamic)
+                             permissions=permissions, dynamic=dynamic,
+                             callback=callback)
 
-    def get(self, pipeline, table, *, key=None,
+    def get(self, pipeline, table, *, callback, key=None,
             filter_str=None, flags=0):
-        """Read table entries.
+        """Read table entries via callback.
 
-        *key* given → single entry; returns a ``TableEntry`` or ``None``.
-        *key* omitted → all entries; returns a ``list[TableEntry]``.
+        The callback is invoked for each response phase with parsed entries.
         """
-        captured = []
-
-        def _capture_cb(obj_ptr, ctx_ptr, cookie_ptr, phase_val):
+        def _on_get(obj_ptr, ctx_ptr, cookie_ptr, phase_val):
             try:
                 phase = Phase(phase_val)
                 if phase in (Phase.SOT, Phase.MOT) and obj_ptr != ffi.NULL:
-                    captured.extend(self._parse_obj(obj_ptr))
+                    callback(self._parse_obj(obj_ptr), phase)
                 return 0
             except Exception:
                 return -1
@@ -431,7 +445,7 @@ class Context:
         c_cb = ffi.callback(
             "int(const struct p4tc_obj*, struct p4tc_runt_ctx*,"
             " uint64_t*, int)",
-            _capture_cb,
+            _on_get,
         )
 
         lib = self._lib
@@ -487,27 +501,20 @@ class Context:
             lib.p4tc_obj_destroy(obj)
             del _keep
 
-        if key is not None and filter_str is None:
-            return captured[0] if captured else None
-        return captured
-
-    def dump(self, pipeline, table, *, filter_str=None):
-        """Dump all entries from a table.
-
-        Returns a ``list[TableEntry]``.
-        """
-        return self.get(pipeline, table,
-                        filter_str=filter_str)
+    def dump(self, pipeline, table, *, callback, filter_str=None):
+        """Dump all entries from a table via callback."""
+        self.get(pipeline, table, callback=callback, filter_str=filter_str)
 
     def delete(self, pipeline, table, *, key=None,
-               filter_str=None, flags=0):
+               filter_str=None, flags=0, callback=None):
         """Delete entry/entries from a table."""
         self._build_and_send(self._lib.p4tc_del, pipeline, table,
-                             key=key, filter_str=filter_str, flags=int(flags))
+                             key=key, filter_str=filter_str, flags=int(flags),
+                             callback=callback)
 
-    def flush(self, pipeline, table, *, flags=0):
+    def flush(self, pipeline, table, *, flags=0, callback=None):
         """Delete all entries from a table."""
-        self.delete(pipeline, table, flags=flags)
+        self.delete(pipeline, table, flags=flags, callback=callback)
 
 
     def _build_extern_obj(self, pipeline, kind, instance, key,
@@ -584,13 +591,31 @@ class Context:
         return obj, _keep
 
     def extern_insert(self, pipeline, kind, instance, *, key,
-                      params=None, flags=0):
+                      params=None, flags=0, callback=None):
         """Create an extern instance entry."""
         obj, _keep = self._build_extern_obj(pipeline, kind, instance,
                                             key, params)
         try:
-            ret = self._lib.p4tc_create(self._ctx, obj, int(flags),
-                                        ffi.NULL, ffi.NULL)
+            if callback is not None:
+                def _on_resp(obj_ptr, ctx_ptr, cookie_ptr, phase_val):
+                    try:
+                        phase = Phase(phase_val)
+                        if phase in (Phase.SOT, Phase.MOT) and obj_ptr != ffi.NULL:
+                            callback(self._parse_ext_obj(obj_ptr), phase)
+                        return 0
+                    except Exception:
+                        return -1
+                c_cb = ffi.callback(
+                    "int(const struct p4tc_obj*, struct p4tc_runt_ctx*,"
+                    " uint64_t*, int)",
+                    _on_resp,
+                )
+                _keep.append(c_cb)
+                ret = self._lib.p4tc_create(self._ctx, obj, int(flags),
+                                            c_cb, ffi.NULL)
+            else:
+                ret = self._lib.p4tc_create(self._ctx, obj, int(flags),
+                                            ffi.NULL, ffi.NULL)
             if ret != 0:
                 raise CRUDError(
                     f"extern create failed for '{kind}/{instance}'",
@@ -600,13 +625,31 @@ class Context:
             del _keep
 
     def extern_update(self, pipeline, kind, instance, *, key,
-                      params=None, flags=0):
+                      params=None, flags=0, callback=None):
         """Update an extern instance entry."""
         obj, _keep = self._build_extern_obj(pipeline, kind, instance,
                                             key, params)
         try:
-            ret = self._lib.p4tc_update(self._ctx, obj, int(flags),
-                                        ffi.NULL, ffi.NULL)
+            if callback is not None:
+                def _on_resp(obj_ptr, ctx_ptr, cookie_ptr, phase_val):
+                    try:
+                        phase = Phase(phase_val)
+                        if phase in (Phase.SOT, Phase.MOT) and obj_ptr != ffi.NULL:
+                            callback(self._parse_ext_obj(obj_ptr), phase)
+                        return 0
+                    except Exception:
+                        return -1
+                c_cb = ffi.callback(
+                    "int(const struct p4tc_obj*, struct p4tc_runt_ctx*,"
+                    " uint64_t*, int)",
+                    _on_resp,
+                )
+                _keep.append(c_cb)
+                ret = self._lib.p4tc_update(self._ctx, obj, int(flags),
+                                            c_cb, ffi.NULL)
+            else:
+                ret = self._lib.p4tc_update(self._ctx, obj, int(flags),
+                                            ffi.NULL, ffi.NULL)
             if ret != 0:
                 raise CRUDError(
                     f"extern update failed for '{kind}/{instance}'",
@@ -615,19 +658,14 @@ class Context:
             self._lib.p4tc_obj_destroy(obj)
             del _keep
 
-    def extern_get(self, pipeline, kind, instance, *, key,
+    def extern_get(self, pipeline, kind, instance, *, callback, key,
                    flags=0):
-        """Read an extern instance entry.
-
-        Returns an ``ExternEntry`` or ``None``.
-        """
-        captured = []
-
-        def _capture_cb(obj_ptr, ctx_ptr, cookie_ptr, phase_val):
+        """Read an extern instance entry via callback."""
+        def _on_get(obj_ptr, ctx_ptr, cookie_ptr, phase_val):
             try:
                 phase = Phase(phase_val)
                 if phase in (Phase.SOT, Phase.MOT) and obj_ptr != ffi.NULL:
-                    captured.extend(self._parse_ext_obj(obj_ptr))
+                    callback(self._parse_ext_obj(obj_ptr), phase)
                 return 0
             except Exception:
                 return -1
@@ -635,7 +673,7 @@ class Context:
         c_cb = ffi.callback(
             "int(const struct p4tc_obj*, struct p4tc_runt_ctx*,"
             " uint64_t*, int)",
-            _capture_cb,
+            _on_get,
         )
 
         obj, _keep = self._build_extern_obj(pipeline, kind, instance, key)
@@ -650,14 +688,30 @@ class Context:
             self._lib.p4tc_obj_destroy(obj)
             del _keep
 
-        return captured[0] if captured else None
-
-    def extern_delete(self, pipeline, kind, instance, *, key, flags=0):
+    def extern_delete(self, pipeline, kind, instance, *, key, flags=0, callback=None):
         """Delete an extern instance entry."""
         obj, _keep = self._build_extern_obj(pipeline, kind, instance, key)
         try:
-            ret = self._lib.p4tc_del(self._ctx, obj, int(flags),
-                                     ffi.NULL, ffi.NULL)
+            if callback is not None:
+                def _on_resp(obj_ptr, ctx_ptr, cookie_ptr, phase_val):
+                    try:
+                        phase = Phase(phase_val)
+                        if phase in (Phase.SOT, Phase.MOT) and obj_ptr != ffi.NULL:
+                            callback(self._parse_ext_obj(obj_ptr), phase)
+                        return 0
+                    except Exception:
+                        return -1
+                c_cb = ffi.callback(
+                    "int(const struct p4tc_obj*, struct p4tc_runt_ctx*,"
+                    " uint64_t*, int)",
+                    _on_resp,
+                )
+                _keep.append(c_cb)
+                ret = self._lib.p4tc_del(self._ctx, obj, int(flags),
+                                         c_cb, ffi.NULL)
+            else:
+                ret = self._lib.p4tc_del(self._ctx, obj, int(flags),
+                                         ffi.NULL, ffi.NULL)
             if ret != 0:
                 raise CRUDError(
                     f"extern delete failed for '{kind}/{instance}'",
