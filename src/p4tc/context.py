@@ -77,13 +77,13 @@ class Context:
 
             elif phase == Phase.ABT:
                 self._aborted = True
-                return -1
+                return 0
 
             return 0
         except Exception:
             # Exceptions cannot propagate through C; cffi will print
-            # the traceback to stderr.  Return -1 so the C side aborts.
-            return -1
+            # the traceback to stderr.
+            return 0
 
     def _reset_response_state(self):
         """Clear per-operation bookkeeping before a new CRUD call."""
@@ -326,7 +326,7 @@ class Context:
                             callback(self._parse_obj(obj_ptr), phase)
                         return 0
                     except Exception:
-                        return -1
+                        return 0
 
                 c_cb = ffi.callback(
                     "int(const struct p4tc_obj*, struct p4tc_runt_ctx*,"
@@ -440,7 +440,7 @@ class Context:
                     callback(self._parse_obj(obj_ptr), phase)
                 return 0
             except Exception:
-                return -1
+                return 0
 
         c_cb = ffi.callback(
             "int(const struct p4tc_obj*, struct p4tc_runt_ctx*,"
@@ -604,7 +604,7 @@ class Context:
                             callback(self._parse_ext_obj(obj_ptr), phase)
                         return 0
                     except Exception:
-                        return -1
+                        return 0
                 c_cb = ffi.callback(
                     "int(const struct p4tc_obj*, struct p4tc_runt_ctx*,"
                     " uint64_t*, int)",
@@ -638,7 +638,7 @@ class Context:
                             callback(self._parse_ext_obj(obj_ptr), phase)
                         return 0
                     except Exception:
-                        return -1
+                        return 0
                 c_cb = ffi.callback(
                     "int(const struct p4tc_obj*, struct p4tc_runt_ctx*,"
                     " uint64_t*, int)",
@@ -668,7 +668,7 @@ class Context:
                     callback(self._parse_ext_obj(obj_ptr), phase)
                 return 0
             except Exception:
-                return -1
+                return 0
 
         c_cb = ffi.callback(
             "int(const struct p4tc_obj*, struct p4tc_runt_ctx*,"
@@ -700,7 +700,7 @@ class Context:
                             callback(self._parse_ext_obj(obj_ptr), phase)
                         return 0
                     except Exception:
-                        return -1
+                        return 0
                 c_cb = ffi.callback(
                     "int(const struct p4tc_obj*, struct p4tc_runt_ctx*,"
                     " uint64_t*, int)",
@@ -729,7 +729,7 @@ class Context:
         ``callback(entry: TableEntry, phase: Phase)`` is called
         for each event.
         """
-        sub = Subscription(self._lib, self._parse_obj,
+        sub = Subscription(self._lib, self._ctx, self._parse_obj,
                            pipeline, table, callback, filter_str)
         self._subscriptions.append(sub)
         return sub
@@ -738,8 +738,7 @@ class Context:
 class Subscription:
     """Background listener for table events.
 
-    Creates its own netlink context so the parent Context can be
-    destroyed independently.
+    Shares the parent Context's netlink context (thread-safe).
 
     Use as a context manager::
 
@@ -747,9 +746,10 @@ class Subscription:
             time.sleep(60)  # fn fires in background
     """
 
-    def __init__(self, lib, parse_obj_fn,
+    def __init__(self, lib, ctx, parse_obj_fn,
                  pipeline, table, callback, filter_str=None):
         self._lib = lib
+        self._ctx = ctx
         self._parse_obj = parse_obj_fn
         self._pipeline = pipeline
         self._table = table
@@ -781,10 +781,7 @@ class Subscription:
         lib = self._lib
         user_cb = self._user_cb
         parse_obj = self._parse_obj
-
-        sub_ctx = lib.p4tc_runt_ctx_create(int(Transport.NETLINK))
-        if sub_ctx == ffi.NULL:
-            return
+        ctx = self._ctx
 
         @ffi.callback(
             "int(const struct p4tc_obj*, struct p4tc_runt_ctx*,"
@@ -798,30 +795,27 @@ class Subscription:
                         user_cb(entry, phase)
                 return 0
             except Exception:
-                return -1
+                return 0
 
         self._c_cb = _on_event
 
-        try:
-            while self._running:
-                obj = lib.p4tc_obj_create(
-                    self._pipeline.encode(), int(ObjType.TABLE))
-                if obj == ffi.NULL:
-                    break
-                try:
-                    lib.p4tc_obj_objname_set(
-                        obj, self._table.encode())
-                    if self._filter_str:
-                        filt = ffi.new(
-                            "char[]", self._filter_str.encode())
-                        lib.p4tc_obj_filter_set(obj, filt)
-                    lib.p4tc_subscribe(
-                        sub_ctx, obj, 0,
-                        _on_event, ffi.NULL)
-                finally:
-                    lib.p4tc_obj_destroy(obj)
-        finally:
-            lib.p4tc_runt_ctx_destroy(sub_ctx)
+        while self._running:
+            obj = lib.p4tc_obj_create(
+                self._pipeline.encode(), int(ObjType.TABLE))
+            if obj == ffi.NULL:
+                break
+            try:
+                lib.p4tc_obj_objname_set(
+                    obj, self._table.encode())
+                if self._filter_str:
+                    filt = ffi.new(
+                        "char[]", self._filter_str.encode())
+                    lib.p4tc_obj_filter_set(obj, filt)
+                lib.p4tc_subscribe(
+                    ctx, obj, 0,
+                    _on_event, ffi.NULL)
+            finally:
+                lib.p4tc_obj_destroy(obj)
 
     def __enter__(self):
         self.start()
