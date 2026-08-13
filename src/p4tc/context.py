@@ -552,77 +552,19 @@ class Context:
                 obj, kind_buf, inst_buf,
                 key, len(param_values), param_arr,
             )
-            if ext == ffi.NULL:
-                lib.p4tc_obj_destroy(obj)
-                raise EntryError(
-                    f"create_runt_ext failed for '{kind}/{instance}'",
-                    errno=_capture_errno())
         else:
-            # p4tc_create_runt_ext requires params for internal setup,
-            # even for GET/DELETE.  Look up the count from the schema.
-            schema = _get_schema(pipeline)
-            n_dummy = 0
-            if schema:
-                ext_schema = schema.get_extern(kind)
-                if ext_schema:
-                    inst_schema = ext_schema.get_instance(instance)
-                    if inst_schema:
-                        n_dummy = len(inst_schema.param_names)
-
-            if n_dummy > 0:
-                dummy_ptrs = [ffi.new("char[]", b"0")
-                              for _ in range(n_dummy)]
-                _keep.extend(dummy_ptrs)
-                dummy_arr = ffi.new("const char *[]", dummy_ptrs)
-                _keep.append(dummy_arr)
-            else:
-                dummy_arr = ffi.NULL
-
             ext = lib.p4tc_create_runt_ext(
                 obj, kind_buf, inst_buf,
-                key, n_dummy, dummy_arr,
+                key, 0, ffi.NULL,
             )
-            if ext == ffi.NULL:
-                lib.p4tc_obj_destroy(obj)
-                raise EntryError(
-                    f"create_runt_ext failed for '{kind}/{instance}'",
-                    errno=_capture_errno())
+
+        if ext == ffi.NULL:
+            lib.p4tc_obj_destroy(obj)
+            raise EntryError(
+                f"create_runt_ext failed for '{kind}/{instance}'",
+                errno=_capture_errno())
 
         return obj, _keep
-
-    def extern_insert(self, pipeline, kind, instance, *, key,
-                      params=None, flags=0, callback=None):
-        """Create an extern instance entry."""
-        obj, _keep = self._build_extern_obj(pipeline, kind, instance,
-                                            key, params)
-        try:
-            if callback is not None:
-                def _on_resp(obj_ptr, ctx_ptr, cookie_ptr, phase_val):
-                    try:
-                        phase = Phase(phase_val)
-                        if phase in (Phase.SOT, Phase.MOT) and obj_ptr != ffi.NULL:
-                            callback(self._parse_ext_obj(obj_ptr), phase)
-                        return 0
-                    except Exception:
-                        return 0
-                c_cb = ffi.callback(
-                    "int(const struct p4tc_obj*, struct p4tc_runt_ctx*,"
-                    " uint64_t*, int)",
-                    _on_resp,
-                )
-                _keep.append(c_cb)
-                ret = self._lib.p4tc_create(self._ctx, obj, int(flags),
-                                            c_cb, ffi.NULL)
-            else:
-                ret = self._lib.p4tc_create(self._ctx, obj, int(flags),
-                                            ffi.NULL, ffi.NULL)
-            if ret != 0:
-                raise CRUDError(
-                    f"extern create failed for '{kind}/{instance}'",
-                    errno=_capture_errno())
-        finally:
-            self._lib.p4tc_obj_destroy(obj)
-            del _keep
 
     def extern_update(self, pipeline, kind, instance, *, key,
                       params=None, flags=0, callback=None):
@@ -683,38 +625,6 @@ class Context:
             if ret != 0:
                 raise CRUDError(
                     f"extern get failed for '{kind}/{instance}'",
-                    errno=_capture_errno())
-        finally:
-            self._lib.p4tc_obj_destroy(obj)
-            del _keep
-
-    def extern_delete(self, pipeline, kind, instance, *, key, flags=0, callback=None):
-        """Delete an extern instance entry."""
-        obj, _keep = self._build_extern_obj(pipeline, kind, instance, key)
-        try:
-            if callback is not None:
-                def _on_resp(obj_ptr, ctx_ptr, cookie_ptr, phase_val):
-                    try:
-                        phase = Phase(phase_val)
-                        if phase in (Phase.SOT, Phase.MOT) and obj_ptr != ffi.NULL:
-                            callback(self._parse_ext_obj(obj_ptr), phase)
-                        return 0
-                    except Exception:
-                        return 0
-                c_cb = ffi.callback(
-                    "int(const struct p4tc_obj*, struct p4tc_runt_ctx*,"
-                    " uint64_t*, int)",
-                    _on_resp,
-                )
-                _keep.append(c_cb)
-                ret = self._lib.p4tc_del(self._ctx, obj, int(flags),
-                                         c_cb, ffi.NULL)
-            else:
-                ret = self._lib.p4tc_del(self._ctx, obj, int(flags),
-                                         ffi.NULL, ffi.NULL)
-            if ret != 0:
-                raise CRUDError(
-                    f"extern delete failed for '{kind}/{instance}'",
                     errno=_capture_errno())
         finally:
             self._lib.p4tc_obj_destroy(obj)
