@@ -633,8 +633,9 @@ class Context:
     def subscribe(self, pipeline, table, *, callback, filter_str=None):
         """Subscribe to events on a table.
 
-        Returns a Subscription that listens in a background thread.
-        Use as a context manager or call start()/stop() manually.
+        Returns a Subscription that listens via the C library's internal
+        event loop (p4tc_subscribe_resp_handle).  Use as a context manager
+        or call start()/stop() manually.
 
         ``callback(entry: TableEntry, phase: Phase)`` is called
         for each event.
@@ -648,7 +649,9 @@ class Context:
 class Subscription:
     """Background listener for table events.
 
-    Shares the parent Context's netlink context (thread-safe).
+    Uses the C library's p4tc_subscribe / p4tc_subscribe_resp_handle /
+    p4tc_unsubscribe API.  The library manages the background thread
+    and epoll internally.
 
     Use as a context manager::
 
@@ -665,33 +668,23 @@ class Subscription:
         self._table = table
         self._user_cb = callback
         self._filter_str = filter_str
-        self._running = False
-        self._thread = None
+        self._sub_id = None
         self._c_cb = None
+        self._thread = None
 
     @property
     def active(self):
-        return (self._running
+        return (self._sub_id is not None
                 and self._thread is not None
                 and self._thread.is_alive())
 
     def start(self):
-        """Start listening in a background thread."""
-        if self._thread is not None and self._thread.is_alive():
+        """Register subscription and start the library's event loop."""
+        if self._sub_id is not None:
             return
-        self._running = True
-        self._thread = threading.Thread(target=self._run, daemon=True)
-        self._thread.start()
 
-    def stop(self):
-        """Signal the listener to stop after the current event batch."""
-        self._running = False
-
-    def _run(self):
-        lib = self._lib
-        user_cb = self._user_cb
         parse_obj = self._parse_obj
-        ctx = self._ctx
+        user_cb = self._user_cb
 
         @ffi.callback(
             "int(const struct p4tc_obj*, struct p4tc_runt_ctx*,"
@@ -709,23 +702,48 @@ class Subscription:
 
         self._c_cb = _on_event
 
-        while self._running:
-            obj = lib.p4tc_obj_create(
-                self._pipeline.encode(), int(ObjType.TABLE))
-            if obj == ffi.NULL:
-                break
-            try:
-                lib.p4tc_obj_objname_set(
-                    obj, self._table.encode())
-                if self._filter_str:
-                    filt = ffi.new(
-                        "char[]", self._filter_str.encode())
-                    lib.p4tc_obj_filter_set(obj, filt)
-                lib.p4tc_subscribe(
-                    ctx, obj, 0,
-                    _on_event, ffi.NULL)
-            finally:
-                lib.p4tc_obj_destroy(obj)
+        obj = self._lib.p4tc_obj_create(
+            self._pipeline.encode(), int(ObjType.TABLE))
+        if obj == ffi.NULL:
+            raise CRUDError("failed to create subscribe object")
+        try:
+            self._lib.p4tc_obj_objname_set(
+                obj, self._table.encode())
+            if self._filter_str:
+                filt = ffi.new(
+                    "char[]", self._filter_str.encode())
+                self._lib.p4tc_obj_filter_set(obj, filt)
+
+            cookie = ffi.new("uint64_t *", 0)
+            sub_id = self._lib.p4tc_subscribe(
+                self._ctx, obj, 0, _on_event, cookie)
+            if sub_id < 0:
+                raise CRUDError(
+                    "p4tc_subscribe failed",
+                    errno=_capture_errno())
+            self._sub_id = sub_id
+        finally:
+            self._lib.p4tc_obj_destroy(obj)
+
+        # p4tc_subscribe_resp_handle blocks, so run it in a thread.
+        lib = self._lib
+        ctx = self._ctx
+        sid = self._sub_id
+
+        def _resp_loop():
+            lib.p4tc_subscribe_resp_handle(ctx, sid)
+
+        self._thread = threading.Thread(target=_resp_loop, daemon=True)
+        self._thread.start()
+
+    def stop(self):
+        """Cancel the subscription and join the library's internal thread."""
+        if self._sub_id is not None:
+            self._lib.p4tc_unsubscribe(self._ctx, self._sub_id)
+            if self._thread is not None:
+                self._thread.join(timeout=5)
+                self._thread = None
+            self._sub_id = None
 
     def __enter__(self):
         self.start()
