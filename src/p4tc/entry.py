@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import socket
+import struct
 from dataclasses import dataclass, field
 
 
@@ -13,10 +15,32 @@ class Param:
     size: int
     type_name: str | None = None
 
+    @property
+    def display_value(self) -> str:
+        """Format the raw param bytes into something readable based on its type.
+
+        For dev params, we decode the ifindex as a plain integer.
+        For ipv4/ipv6, we use standard dotted or colon notation.
+        For macaddr, we print the usual colon-separated hex.
+        Anything else just comes out as raw hex.
+        """
+        t = (self.type_name or "").lower()
+        try:
+            if t == "dev":
+                # the library gives us the ifindex as a little-endian u32
+                return str(struct.unpack_from("<I", self.value.ljust(4, b"\x00"))[0])
+            if t == "ipv4":
+                return socket.inet_ntop(socket.AF_INET, self.value[:4])
+            if t == "ipv6":
+                return socket.inet_ntop(socket.AF_INET6, self.value[:16])
+            if t == "macaddr":
+                return ":".join(f"{b:02x}" for b in self.value[:6])
+        except Exception:
+            pass
+        return self.value.hex()
+
     def __repr__(self):
-        val_hex = self.value.hex() if len(self.value) <= 16 else \
-            self.value[:16].hex() + "..."
-        return (f"Param({self.name!r}, {val_hex}, "
+        return (f"Param({self.name!r}, {self.display_value}, "
                 f"size={self.size}, type={self.type_name!r})")
 
 

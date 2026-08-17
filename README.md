@@ -12,8 +12,6 @@ pip install ".[dev]"
 
 **Requirements**: Linux kernel with P4TC support and `libp4tctrl.so` installed.
 
-> If developing inside a VirtualBox VM (e.g. via Vagrant), create your Python
-> venv on the local filesystem (`~` or `/tmp`), not on `/vagrant`.
 
 ## Quick Start
 
