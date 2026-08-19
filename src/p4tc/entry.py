@@ -16,19 +16,19 @@ class Param:
     type_name: str | None = None
 
     @property
-    def display_value(self) -> str:
-        """Format the raw param bytes into something readable based on its type.
+    def decoded(self) -> object:
+        """Return the param value as a typed Python object.
 
-        For dev params, we decode the ifindex as a plain integer.
-        For ipv4/ipv6, we use standard dotted or colon notation.
-        For macaddr, we print the usual colon-separated hex.
-        Anything else just comes out as raw hex.
+        - dev      -> int  (ifindex, little-endian u32)
+        - ipv4     -> str  (dotted notation, e.g. '10.0.0.1')
+        - ipv6     -> str  (colon notation)
+        - macaddr  -> str  (colon-hex, e.g. '00:aa:bb:cc:dd:ee')
+        - anything else -> bytes (raw)
         """
         t = (self.type_name or "").lower()
         try:
             if t == "dev":
-                # the library gives us the ifindex as a little-endian u32
-                return str(struct.unpack_from("<I", self.value.ljust(4, b"\x00"))[0])
+                return struct.unpack_from("<I", self.value.ljust(4, b"\x00"))[0]
             if t == "ipv4":
                 return socket.inet_ntop(socket.AF_INET, self.value[:4])
             if t == "ipv6":
@@ -37,7 +37,15 @@ class Param:
                 return ":".join(f"{b:02x}" for b in self.value[:6])
         except Exception:
             pass
-        return self.value.hex()
+        return self.value
+
+    @property
+    def display_value(self) -> str:
+        """String representation of the decoded value (backwards compat)."""
+        d = self.decoded
+        if isinstance(d, bytes):
+            return d.hex()
+        return str(d)
 
     def __repr__(self):
         return (f"Param({self.name!r}, {self.display_value}, "
@@ -52,8 +60,12 @@ class Action:
     params: dict[str, Param] = field(default_factory=dict)
 
     def __repr__(self):
-        param_names = list(self.params.keys())
-        return f"Action({self.name!r}, index={self.index}, params={param_names})"
+        if self.params:
+            param_str = ", ".join(
+                f"{n}={p.display_value}" for n, p in self.params.items()
+            )
+            return f"Action({self.name!r}, index={self.index}, {param_str})"
+        return f"Action({self.name!r}, index={self.index})"
 
 
 @dataclass(frozen=True)
@@ -63,6 +75,7 @@ class TableEntry:
     priority: int
     key_bytes: bytes
     key_size: int
+    key: dict[str, object] = field(default_factory=dict)
     mask_bytes: bytes | None = None
     permissions: int = 0
     dynamic: bool = False
@@ -70,9 +83,13 @@ class TableEntry:
     actions: list[Action] = field(default_factory=list)
 
     def __repr__(self):
-        act_names = [a.name for a in self.actions]
+        key_str = (
+            repr(self.key) if self.key
+            else self.key_bytes.hex()
+        )
+        act_reprs = [repr(a) for a in self.actions]
         return (f"TableEntry({self.table_name!r}, prio={self.priority}, "
-                f"key={self.key_bytes.hex()}, actions={act_names})")
+                f"key={key_str}, actions={act_reprs})")
 
 
 @dataclass(frozen=True)
@@ -86,6 +103,11 @@ class ExternEntry:
     params: dict[str, Param] = field(default_factory=dict)
 
     def __repr__(self):
-        param_names = list(self.params.keys())
+        if self.params:
+            param_str = ", ".join(
+                f"{n}={p.display_value}" for n, p in self.params.items()
+            )
+            return (f"ExternEntry({self.kind!r}/{self.instance!r}, "
+                    f"key={self.key}, {param_str})")
         return (f"ExternEntry({self.kind!r}/{self.instance!r}, "
-                f"key={self.key}, params={param_names})")
+                f"key={self.key})")

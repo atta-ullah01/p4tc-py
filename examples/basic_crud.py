@@ -20,10 +20,10 @@ TABLE = "ingress/nh_table"
 
 
 def on_get(entries, phase):
-    """Callback for get/dump — receives ([TableEntry, ...], Phase)."""
+    """Callback for get/dump, receives ([TableEntry, ...], Phase)."""
     print(f"  phase={phase.name}, {len(entries)} entries")
     for e in entries:
-        print(f"  table={e.table_name}, key={e.key_bytes.hex()}, prio={e.priority}")
+        print(f"  table={e.table_name}, key={e.key}, prio={e.priority}")
         for a in e.actions:
             print(f"    action={a.name}")
             for name, p in a.params.items():
@@ -31,8 +31,7 @@ def on_get(entries, phase):
 
 
 def main():
-    # provision() returns a PipelineConfig — keep it alive for the
-    # duration of the program, otherwise GC destroys the pipeline.
+    # Keep config alive, otherwise GC destroys the pipeline.
     config = p4tc.provision(PIPE)
 
     with p4tc.Context() as ctx:

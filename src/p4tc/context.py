@@ -1,17 +1,42 @@
-"""Runtime context — netlink transport for CRUD operations."""
+"""Runtime context: netlink transport for CRUD operations."""
 
 from __future__ import annotations
 
+import socket
+import struct
 import threading
 
 from ._ffi import ffi, _require_lib
-from ._schema import _get_schema
+from ._schema import KeyFieldSchema, _get_schema
 from .entry import Action, ExternEntry, Param, TableEntry
 from .errors import (
     ContextError, CRUDError, EntryError, KeyError_, ObjectError,
     SubscribeError, _capture_errno,
 )
 from .types import Entity, MsgFlags, ObjType, Phase, Transport
+
+
+def _decode_key_field(raw: bytes, field: KeyFieldSchema) -> object:
+    """Decode a raw key field byte slice to a typed Python value.
+
+    Uses the field type from the pipeline schema to produce
+    something the user can read directly.
+    """
+    t = field.type.lower()
+    try:
+        if t == "ipv4":
+            return socket.inet_ntop(socket.AF_INET, raw[:4])
+        if t == "ipv6":
+            return socket.inet_ntop(socket.AF_INET6, raw[:16])
+        if t == "macaddr":
+            return ":".join(f"{b:02x}" for b in raw[:6])
+        if t == "dev":
+            return struct.unpack_from("<I", raw.ljust(4, b"\x00"))[0]
+        # Generic integer (bit<N>, bool, uint*)
+        byte_len = max(1, (field.bitwidth + 7) // 8)
+        return int.from_bytes(raw[:byte_len], byteorder="big")
+    except Exception:
+        return raw
 
 
 class Context:
@@ -136,7 +161,8 @@ class Context:
         return Action(name=name, index=index, params=params)
 
     @staticmethod
-    def _parse_entry(lib, e_ptr):
+    def _parse_entry(lib, e_ptr, pipeline: str | None = None,
+                     table: str | None = None):
         name_ptr = lib.p4tc_runt_tbl_attrs_name_get(e_ptr)
         table_name = ffi.string(name_ptr).decode() \
             if name_ptr != ffi.NULL else None
@@ -163,19 +189,39 @@ class Context:
             actions.append(Context._parse_action(lib, a, e_ptr))
             a = lib.p4tc_runt_tbl_attrs_act_next(e_ptr, a)
 
+        # Decode key bytes into a named dict using the pipeline schema.
+        # The C library often returns an empty table_name in callbacks,
+        # so we prefer the caller-supplied 'table' arg for schema lookup.
+        key_dict: dict[str, object] = {}
+        lookup_table = table or table_name or ""
+        if key_bytes and lookup_table and pipeline:
+            schema = _get_schema(pipeline)
+            tbl_schema = schema.get_table(lookup_table) if schema else None
+            if tbl_schema and tbl_schema.key_fields:
+                offset = 0
+                for kf in tbl_schema.key_fields:
+                    byte_len = max(1, (kf.bitwidth + 7) // 8)
+                    chunk = key_bytes[offset: offset + byte_len]
+                    key_dict[kf.name] = _decode_key_field(chunk, kf)
+                    offset += byte_len
+        if not key_dict and key_bytes:
+            key_dict = {"raw": key_bytes.hex()}
+
         return TableEntry(
-            table_name=table_name, priority=priority,
+            table_name=table_name or lookup_table, priority=priority,
             key_bytes=key_bytes, key_size=key_size,
+            key=key_dict,
             mask_bytes=mask_bytes, permissions=permissions,
             dynamic=dynamic, aging=aging, actions=actions,
         )
 
-    def _parse_obj(self, obj_ptr):
+    def _parse_obj(self, obj_ptr, pipeline: str | None = None,
+                   table: str | None = None):
         lib = self._lib
         entries = []
         e = lib.p4tc_obj_tbl_entry_first(obj_ptr)
         while e != ffi.NULL:
-            entries.append(self._parse_entry(lib, e))
+            entries.append(self._parse_entry(lib, e, pipeline, table))
             e = lib.p4tc_obj_tbl_entry_next(obj_ptr, e)
         return entries
 
@@ -323,7 +369,7 @@ class Context:
                     try:
                         phase = Phase(phase_val)
                         if phase in (Phase.SOT, Phase.MOT) and obj_ptr != ffi.NULL:
-                            callback(self._parse_obj(obj_ptr), phase)
+                            callback(self._parse_obj(obj_ptr, pipeline, table), phase)
                         return 0
                     except Exception:
                         return 0
@@ -437,7 +483,7 @@ class Context:
             try:
                 phase = Phase(phase_val)
                 if phase in (Phase.SOT, Phase.MOT) and obj_ptr != ffi.NULL:
-                    callback(self._parse_obj(obj_ptr), phase)
+                    callback(self._parse_obj(obj_ptr, pipeline, table), phase)
                 return 0
             except Exception:
                 return 0
@@ -694,8 +740,9 @@ class Subscription:
                 phase = Phase(phase_val)
                 if phase in (Phase.SOT, Phase.MOT) \
                         and obj_ptr != ffi.NULL:
-                    for entry in parse_obj(obj_ptr):
-                        user_cb(entry, phase)
+                    # Deliver a full list, consistent with get/dump callbacks.
+                    entries = parse_obj(obj_ptr, self._pipeline, self._table)
+                    user_cb(entries, phase)
                 return 0
             except Exception:
                 return 0

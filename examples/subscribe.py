@@ -24,16 +24,13 @@ TABLE = "ingress/nh_table"
 event_count = 0
 
 
-def on_event(entry, phase):
-    """Subscription callback — receives (TableEntry, Phase) per entry.
-
-    NOTE: Unlike get/dump, subscribe delivers ONE entry at a time,
-    not a list.
-    """
+def on_event(entries, phase):
+    """Subscription callback, receives ([TableEntry, ...], Phase), same as get/dump."""
     global event_count
-    event_count += 1
-    print(f"  event: phase={phase.name}, table={entry.table_name}, "
-          f"key={entry.key_bytes.hex()}")
+    event_count += len(entries)
+    for entry in entries:
+        print(f"  event: phase={phase.name}, table={entry.table_name}, "
+              f"key={entry.key}")
 
 
 def main():

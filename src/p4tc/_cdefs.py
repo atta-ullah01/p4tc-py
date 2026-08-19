@@ -43,7 +43,7 @@ int  p4tc_obj_objname_set(struct p4tc_obj *p4tc_obj, const char *objname);
 int  p4tc_obj_pname_set(struct p4tc_obj *p4tc_obj, const char *pname);
 int  p4tc_obj_filter_set(struct p4tc_obj *p4tc_obj, const char *filter_str);
 
-/* key construction — string arrays, lib handles type conversion */
+/* key construction, string arrays, lib handles type conversion */
 struct p4tc_key *p4tc_make_key(struct p4tc_obj *p4tc_obj,
                                int n_kfs,
                                const char **kfs);
@@ -88,7 +88,7 @@ p4tc_runt_tbl_attrs_add(struct p4tc_obj *p4tc_obj,
                         const void *key, const void *mask,
                         uint32_t keysz);
 
-/* action construction — string arrays */
+/* action construction, string arrays */
 struct p4tc_runt_act_attrs *
 p4tc_create_runt_act(struct p4tc_runt_tbl_attrs *tbl_entry,
                      const char *act_path,
@@ -120,7 +120,7 @@ int  p4tc_runt_param_attrs_name_add(struct p4tc_runt_param_attrs *attrs,
 int  p4tc_runt_param_attrs_value_add(struct p4tc_runt_param_attrs *attrs,
                                       const char *value_str);
 
-/* extern construction — string arrays */
+/* extern construction, string arrays */
 struct p4tc_runt_ext_attrs *
 p4tc_create_runt_ext(struct p4tc_obj *p4tc_obj,
                      const char *kind,

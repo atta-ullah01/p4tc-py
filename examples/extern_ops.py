@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Example: extern update and get.
 
-Externs only support update and get — no insert or delete.
+Externs only support update and get, no insert or delete.
 
 Pipeline setup (inside the P4TC VM):
     tar xzf examples/register.tgz -C ~
@@ -21,7 +21,7 @@ PIPE = "register"
 
 
 def on_extern_get(entries, phase):
-    """Callback for extern_get — receives ([ExternEntry, ...], Phase)."""
+    """Callback for extern_get, receives ([ExternEntry, ...], Phase)."""
     print(f"  phase={phase.name}, {len(entries)} entries")
     for e in entries:
         print(f"  kind={e.kind}, instance={e.instance}, key={e.key}")

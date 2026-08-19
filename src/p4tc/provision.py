@@ -57,7 +57,7 @@ def provision(pipeline_name: str, template_path: str | None = None):
             Uses cwd if None.
 
     Returns:
-        PipelineConfig — keep alive for CRUD.
+        PipelineConfig -- keep alive for CRUD.
     """
     lib = _require_lib()
 
