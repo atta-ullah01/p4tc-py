@@ -206,29 +206,18 @@ def on_event(entries, phase):
     for entry in entries:
         print(f"Update: key={entry.key}")
 
-# Subscription requires a dedicated context — do not share with CRUD.
-ctx_sub = p4tc.Context()
-ctx_crud = p4tc.Context()
+with p4tc.Context() as ctx:
+    sub = ctx.subscribe("my_pipeline", "ingress/my_table", callback=on_event)
+    sub.start()
+    print(sub.active)  # True
 
-sub = ctx_sub.subscribe("my_pipeline", "ingress/my_table", callback=on_event)
-sub.start()
-print(sub.active)  # True
+    ctx.insert("my_pipeline", "ingress/my_table",
+               key=["10.0.0.1"], action=("ingress/drop", []))
+    time.sleep(1.0)
 
-# Trigger events from the CRUD context
-ctx_crud.insert("my_pipeline", "ingress/my_table",
-                key=["10.0.0.1"], action=("ingress/drop", []))
-time.sleep(1.0)
-
-sub.stop()         # calls p4tc_unsubscribe, joins the thread
-print(sub.active)  # False
-
-ctx_crud.destroy()
-ctx_sub.destroy()
+    sub.stop()
+    print(sub.active)  # False
 ```
-
-> **Important**: Subscription and CRUD must use **separate** `Context` objects.
-> A subscription socket enters a continuous listen state and cannot be used
-> for outgoing commands at the same time.
 
 An optional `filter_str` parameter can be passed to filter events:
 
@@ -291,6 +280,3 @@ Exceptions generally include an errno indicating why the operation failed in the
 3. **Extern Params**: While input parameters for `extern_update` are a list of
    strings, the fetched `entry.params` is a `dict[str, Param]`.
    Use `p.decoded` or `.display_value` to read the values.
-4. **Separate Contexts for Subscribe**: A subscription socket is in a continuous
-   listen state — always use a dedicated `Context` for subscriptions and a
-   separate `Context` for CRUD operations.

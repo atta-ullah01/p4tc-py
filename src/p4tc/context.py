@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import socket
 import struct
-import threading
 
 from ._ffi import ffi, _require_lib
 from ._schema import KeyFieldSchema, _get_schema
@@ -677,13 +676,12 @@ class Context:
             del _keep
 
     def subscribe(self, pipeline, table, *, callback, filter_str=None):
-        """Subscribe to events on a table.
+        """Subscribe to table events.
 
-        Returns a Subscription that listens via the C library's internal
-        event loop (p4tc_subscribe_resp_handle).  Use as a context manager
-        or call start()/stop() manually.
+        Returns a Subscription. Call start() or use as a context manager.
+        The same Context can be used for both subscribe and CRUD.
 
-        ``callback(entry: TableEntry, phase: Phase)`` is called
+        callback(entries: list[TableEntry], phase: Phase) is called
         for each event.
         """
         sub = Subscription(self._lib, self._ctx, self._parse_obj,
@@ -694,10 +692,6 @@ class Context:
 
 class Subscription:
     """Background listener for table events.
-
-    Uses the C library's p4tc_subscribe / p4tc_subscribe_resp_handle /
-    p4tc_unsubscribe API.  The library manages the background thread
-    and epoll internally.
 
     Use as a context manager::
 
@@ -716,13 +710,10 @@ class Subscription:
         self._filter_str = filter_str
         self._sub_id = None
         self._c_cb = None
-        self._thread = None
 
     @property
     def active(self):
-        return (self._sub_id is not None
-                and self._thread is not None
-                and self._thread.is_alive())
+        return self._sub_id is not None
 
     def start(self):
         """Register subscription and start the library's event loop."""
@@ -740,7 +731,6 @@ class Subscription:
                 phase = Phase(phase_val)
                 if phase in (Phase.SOT, Phase.MOT) \
                         and obj_ptr != ffi.NULL:
-                    # Deliver a full list, consistent with get/dump callbacks.
                     entries = parse_obj(obj_ptr, self._pipeline, self._table)
                     user_cb(entries, phase)
                 return 0
@@ -772,24 +762,13 @@ class Subscription:
         finally:
             self._lib.p4tc_obj_destroy(obj)
 
-        # p4tc_subscribe_resp_handle blocks, so run it in a thread.
-        lib = self._lib
-        ctx = self._ctx
-        sid = self._sub_id
-
-        def _resp_loop():
-            lib.p4tc_subscribe_resp_handle(ctx, sid)
-
-        self._thread = threading.Thread(target=_resp_loop, daemon=True)
-        self._thread.start()
+        # Spawns an internal thread in the library; returns immediately.
+        self._lib.p4tc_subscribe_resp_handle(self._ctx, self._sub_id)
 
     def stop(self):
-        """Cancel the subscription and join the library's internal thread."""
+        """Cancel the subscription."""
         if self._sub_id is not None:
             self._lib.p4tc_unsubscribe(self._ctx, self._sub_id)
-            if self._thread is not None:
-                self._thread.join(timeout=5)
-                self._thread = None
             self._sub_id = None
 
     def __enter__(self):

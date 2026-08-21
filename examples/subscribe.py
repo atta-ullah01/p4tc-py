@@ -1,8 +1,6 @@
 #!/usr/bin/env python3
 """Example: event subscription.
 
-Uses a separate context for CRUD while subscription is active.
-
 Pipeline setup (inside the P4TC VM):
     tar xzf examples/register.tgz -C ~
     cd ~/register
@@ -36,37 +34,29 @@ def on_event(entries, phase):
 def main():
     config = p4tc.provision(PIPE)
 
-    # Subscription and CRUD need separate contexts.
-    ctx_sub = p4tc.Context()
-    ctx_crud = p4tc.Context()
+    with p4tc.Context() as ctx:
+        print("subscribe ...")
+        sub = ctx.subscribe(PIPE, TABLE, callback=on_event)
+        sub.start()
+        print(f"  active={sub.active}")
 
-    print("subscribe ...")
-    sub = ctx_sub.subscribe(PIPE, TABLE, callback=on_event)
-    sub.start()
-    print(f"  active={sub.active}")
+        print("insert (triggers event) ...")
+        ctx.insert(
+            PIPE, TABLE,
+            key=["10.0.0.1"],
+            action=("ingress/drop", []),
+        )
 
-    # Trigger some events (on a different context)
-    print("insert (triggers event) ...")
-    ctx_crud.insert(
-        PIPE, TABLE,
-        key=["10.0.0.1"],
-        action=("ingress/drop", []),
-    )
+        print("delete (triggers event) ...")
+        ctx.delete(PIPE, TABLE, key=["10.0.0.1"])
 
-    print("delete (triggers event) ...")
-    ctx_crud.delete(PIPE, TABLE, key=["10.0.0.1"])
+        time.sleep(1.0)
 
-    # Give the background thread time to receive events
-    time.sleep(1.0)
+        print("stop ...")
+        sub.stop()
+        print(f"  active={sub.active}")
+        print(f"  total events: {event_count}")
 
-    # Stop
-    print("stop ...")
-    sub.stop()
-    print(f"  active={sub.active}")
-    print(f"  total events: {event_count}")
-
-    ctx_crud.destroy()
-    ctx_sub.destroy()
     config.destroy()
     print("\ndone.")
 
